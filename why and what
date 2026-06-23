@@ -1,0 +1,21 @@
+using docling to parse becasue it allows for efficient and accurate extraction of structured information from unstructured
+unlke pypdf2 they are just basic libraries cant parse table and image
+docling can use ocr and locally available model can easily export to json and markdown
+
+the most difficult part was to setup environment annd dependencies i had python 3.14 which was not compatible with some of the libraries I needed, so I had to downgrade to Python 3.11.9
+SPECIALLY WITH pytorch because i had to run main model in gpu i had to install pytorch gpu version which was not compatable with new python
+also i made custom env(myenv to manage env) also i had to use pytorch gpu version for docling also
+
+first step is parsing
+parse pdf-->to save local .md files
+we are using enrichment for formula understanding also for code
+
+also while parsing if pdf is >30 page my pc memory gets full so have to devide pdf in 25 page batches
+we usede py pdf to split in to 20 page chunk then parse by dockling using pypdf
+installed miniconda and manage local env
+
+one more thing docling is shit thats what i thought
+after i tried nought by meta and pynullm4 somthing it was parsing bad
+docling was gold for parsing tables and by disabling formula enrichment the parsing time went down from 3 min per pdf to 30 sec
+
+after that i moved on chunking which i used heorchy

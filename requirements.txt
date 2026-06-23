@@ -1,0 +1,18 @@
+# Core Deep Learning & NLP
+torch>=2.0.0
+transformers>=4.40.0
+sentence-transformers>=3.0.0
+bitsandbytes>=0.42.0
+accelerate>=0.28.0
+
+# Document Ingestion & Chunking
+docling>=2.0.0
+PyMuPDF>=1.24.0
+
+# Search & Retrieval
+faiss-cpu>=1.8.0
+rank-bm25>=0.2.2
+
+# Utilities
+numpy
+tqdm
