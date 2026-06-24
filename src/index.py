@@ -33,13 +33,13 @@ EMBED_MODEL   = "BAAI/bge-large-en-v1.5"
 RERANK_MODEL  = "BAAI/bge-reranker-v2-m3"   # re-enabled
 EMBED_DIM     = 1024
 EMBED_DEVICE  = "cpu"
-RERANK_DEVICE = "cpu"
+RERANK_DEVICE = "cuda:0"
 
 FAISS_TOP_K   = 20    # candidates from each retriever before fusion
 RERANK_TOP_N  = 4     # keep top N after reranker
 CONTEXT_WINDOW = 0    # adjacent chunk expansion (keep 0 for VRAM safety)
 
-MAX_NEW_TOKENS = 512
+MAX_NEW_TOKENS = 2048
 DO_SAMPLE      = False
 
 # conversation memory — keep last N turns
@@ -425,9 +425,12 @@ class RAGEngine:
         if "\u0120" in answer or "\u010a" in answer:
             answer = answer.replace("\u0120", " ").replace("\u010a", "\n")
 
-        # strip DeepSeek-R1 chain-of-thought
+        # strip DeepSeek-R1 chain-of-thought safely
         if "<think>" in answer:
-            answer = answer.split("</think>")[-1].strip()
+            if "</think>" in answer:
+                answer = answer.split("</think>")[-1].strip()
+            else:
+                answer = "[Generation cut off during thinking. Please increase MAX_NEW_TOKENS.]"
 
         return answer.strip()
 

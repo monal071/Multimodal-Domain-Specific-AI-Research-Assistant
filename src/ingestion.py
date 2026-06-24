@@ -1,9 +1,3 @@
-"""
-PDF → JSONL chunks
-  - Docling for parsing (structure + tables)
-  - Custom chunker: heading-aware, overlap only when needed, junk filtered
-"""
-
 import gc
 import json
 import re
@@ -21,8 +15,8 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
 
 # ── config ─────────────────────────────────────────────────────────────────────
-PDF_DIR    = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\DATA\raw data\papers")
-OUT_DIR    = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\DATA\PARSED DATA")
+PDF_DIR    = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\raw data\papers")
+OUT_DIR    = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\PARSED DATA")
 TEMP_DIR   = Path("temp_chunks")
 PAGE_CHUNK = 20
 
@@ -56,12 +50,16 @@ opts.do_code_enrichment   = False
 
 converter = DocumentConverter(format_options={
     InputFormat.PDF: PdfFormatOption(
-        pipeline_cls=ThreadedStandardPdfPipeline, 
+        pipeline_cls=ThreadedStandardPdfPipeline,
         pipeline_options=opts,
     )
 })
 print("Models loaded ✓\n")
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CUSTOM CHUNKER
+# ══════════════════════════════════════════════════════════════════════════════
 
 _TABLE_ROW  = re.compile(r"^\|.+\|", re.MULTILINE)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)", re.MULTILINE)
@@ -77,77 +75,6 @@ _JUNK = re.compile(
 )
 
 
-# ── title extraction ───────────────────────────────────────────────────────────
-_NOISE_TITLE = re.compile(
-    r"^(abstract|introduction|keywords?|doi|arxiv|preprint|"
-    r"proceedings?|conference|workshop|journal|volume|issue|pages?|"
-    r"copyright|©|\d{4})\b",
-    re.IGNORECASE,
-)
-
-def _extract_title_from_pdf(pdf_path: Path) -> str:
-    """
-    Extract paper title from the first page using font-size heuristic.
-    The largest-font text on page 1 is almost always the title.
-    Falls back to pdf_path.stem if nothing clean is found.
-    """
-    try:
-        with fitz.open(str(pdf_path)) as doc:
-            page = doc[0]
-            spans = []
-            for blk in page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]:
-                if blk.get("type") != 0:
-                    continue
-                for line in blk.get("lines", []):
-                    for span in line.get("spans", []):
-                        text = span["text"].strip()
-                        if text:
-                            spans.append({
-                                "text": text,
-                                "size": round(span["size"], 1),
-                                "y0":   round(span["origin"][1], 1),
-                            })
-
-        if not spans:
-            return pdf_path.stem
-
-        max_size  = max(s["size"] for s in spans)
-        threshold = max_size * 0.85          # allow slight size variation within title
-        big       = [s for s in spans if s["size"] >= threshold]
-        big.sort(key=lambda s: s["y0"])
-
-        # merge spans that sit on the same visual line (within 4 px)
-        lines_merged, cur_y, cur_texts = [], None, []
-        for s in big:
-            if cur_y is None or abs(s["y0"] - cur_y) > 4:
-                if cur_texts:
-                    lines_merged.append(" ".join(cur_texts))
-                cur_y, cur_texts = s["y0"], [s["text"]]
-            else:
-                cur_texts.append(s["text"])
-        if cur_texts:
-            lines_merged.append(" ".join(cur_texts))
-
-        clean = [
-            ln for ln in lines_merged
-            if len(ln) > 6 and not _NOISE_TITLE.match(ln.strip())
-        ]
-
-        title = re.sub(r"\s+", " ", " ".join(clean)).strip()
-        return title if len(title) > 6 else pdf_path.stem
-
-    except Exception:
-        return pdf_path.stem
-
-
-def _title_to_doc_id(title: str) -> str:
-    """'Attention Is All You Need' → 'Attention_Is_All_You_Need' (max 80 chars)"""
-    safe = re.sub(r"[^\w\s-]", "", title)
-    safe = re.sub(r"[\s-]+", "_", safe.strip())
-    return re.sub(r"_+", "_", safe).strip("_")[:80]
-
-
-# ── helpers (unchanged) ────────────────────────────────────────────────────────
 def _is_junk(line: str) -> bool:
     return bool(_JUNK.match(line.strip()))
 
@@ -193,7 +120,7 @@ def _split_markdown(md: str) -> list[dict]:
             buf.append(line)
             continue
 
-        m = _HEADING_RE.match(line) 
+        m = _HEADING_RE.match(line)
         if m:
             level = len(m.group(1))
             title = m.group(2).strip()
@@ -310,6 +237,7 @@ def chunk_markdown(md: str, doc_id: str, source_file: str,
 # ══════════════════════════════════════════════════════════════════════════════
 #  PDF SPLITTING + CONVERSION
 # ══════════════════════════════════════════════════════════════════════════════
+
 def write_chunk(src: Path, dst: Path, start: int, end: int):
     with fitz.open(str(src)) as doc:
         sub = fitz.open()
@@ -323,12 +251,8 @@ def convert_to_md(path: Path) -> str:
     return result.document.export_to_markdown(image_placeholder="")
 
 
-def process_pdf(pdf_path: Path) -> tuple[list[dict], str]:
-    # ── extract real title; derive doc_id from it ──────────────────────────
-    paper_title = _extract_title_from_pdf(pdf_path)
-    doc_id      = _title_to_doc_id(paper_title)
-    print(f"   Title : {paper_title}")
-
+def process_pdf(pdf_path: Path) -> list[dict]:
+    doc_id     = re.sub(r"\W+", "_", pdf_path.stem)
     all_chunks = []
 
     with fitz.open(str(pdf_path)) as doc:
@@ -337,7 +261,7 @@ def process_pdf(pdf_path: Path) -> tuple[list[dict], str]:
     if n_pages <= PAGE_CHUNK:
         print(f"   1/1  pages 1–{n_pages} …", end=" ", flush=True)
         md     = convert_to_md(pdf_path)
-        chunks = chunk_markdown(md, doc_id, paper_title, 1, n_pages)
+        chunks = chunk_markdown(md, doc_id, pdf_path.name, 1, n_pages)
         all_chunks.extend(chunks)
         print(f"ok ({len(chunks)} chunks)")
     else:
@@ -349,7 +273,7 @@ def process_pdf(pdf_path: Path) -> tuple[list[dict], str]:
             try:
                 write_chunk(pdf_path, slice_path, start, end)
                 md     = convert_to_md(slice_path)
-                chunks = chunk_markdown(md, doc_id, paper_title, start+1, end)
+                chunks = chunk_markdown(md, doc_id, pdf_path.name, start+1, end)
                 all_chunks.extend(chunks)
                 print(f"ok ({len(chunks)} chunks)")
             except Exception as e:
@@ -364,7 +288,7 @@ def process_pdf(pdf_path: Path) -> tuple[list[dict], str]:
         c["prev_chunk_id"] = all_chunks[i-1]["chunk_id"] if i > 0                else None
         c["next_chunk_id"] = all_chunks[i+1]["chunk_id"] if i < len(all_chunks)-1 else None
 
-    return all_chunks, doc_id
+    return all_chunks
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -375,14 +299,15 @@ pdfs = sorted(PDF_DIR.rglob("*.pdf"))
 print(f"Found {len(pdfs)} PDFs\n")
 
 for pdf_path in pdfs:
+    out_path = OUT_DIR / f"{pdf_path.stem}.jsonl"
+    if out_path.exists():
+        print(f"SKIP  {pdf_path.name}")
+        continue
+
     print(f"▶  {pdf_path.name}")
     t0 = time.time()
     try:
-        chunks, doc_id = process_pdf(pdf_path)
-        out_path = OUT_DIR / f"{doc_id}.jsonl"
-        if out_path.exists():
-            print(f"   SKIP  (already exists: {out_path.name})")
-            continue
+        chunks = process_pdf(pdf_path)
         with open(out_path, "w", encoding="utf-8") as f:
             for c in chunks:
                 f.write(json.dumps(c, ensure_ascii=False) + "\n")
