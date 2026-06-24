@@ -23,7 +23,9 @@ A domain-specific research assistant implementing a high-performance Retrieval-A
 
 4. **Quantized Local Generation**:
    - Implements a conversational answer engine using **DeepSeek-R1-Distill-Qwen-8B** quantized to 4-bit precision (`bitsandbytes` `nf4`).
+   - Streams generation directly to the console in real-time using HuggingFace `TextStreamer`.
    - Conversational memory window to resolve multi-turn context (e.g., "that", "this method").
+   - VRAM-optimized design (Reranker mapped to CPU to prevent out-of-memory errors on 8GB GPUs).
 
 ---
 
@@ -38,6 +40,8 @@ A domain-specific research assistant implementing a high-performance Retrieval-A
 │   └── faiss_index/                    # Alternative/legacy FAISS indexes
 ├── models/                             # Local weights folder (e.g., DeepSeek-R1-Qwen)
 ├── src/
+│   ├── config.py                       # Centralized global configurations and paths
+│   ├── models.py                       # Shared data classes (RAGResult, RetrievedChunk)
 │   ├── ingestion.py                    # PDF parser & custom chunker
 │   ├── index0.py                       # Embedding generator & FAISS index builder
 │   └── index.py                        # Conversational query engine with hybrid retrieval

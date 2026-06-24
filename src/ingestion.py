@@ -14,9 +14,9 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
 
+from config import PDF_DIR, PARSED_DIR
+
 # ── config ─────────────────────────────────────────────────────────────────────
-PDF_DIR    = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\raw data\papers")
-OUT_DIR    = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\PARSED DATA")
 TEMP_DIR   = Path("temp_chunks")
 PAGE_CHUNK = 20
 
@@ -33,7 +33,7 @@ _SKIP_HEADINGS = re.compile(
     re.IGNORECASE,
 )
 
-OUT_DIR.mkdir(exist_ok=True, parents=True)
+PARSED_DIR.mkdir(exist_ok=True, parents=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ── Docling pipeline ───────────────────────────────────────────────────────────
@@ -299,7 +299,7 @@ pdfs = sorted(PDF_DIR.rglob("*.pdf"))
 print(f"Found {len(pdfs)} PDFs\n")
 
 for pdf_path in pdfs:
-    out_path = OUT_DIR / f"{pdf_path.stem}.jsonl"
+    out_path = PARSED_DIR / f"{pdf_path.stem}.jsonl"
     if out_path.exists():
         print(f"SKIP  {pdf_path.name}")
         continue

@@ -23,55 +23,14 @@ import numpy as np
 import torch
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextStreamer
 
-# ── config ─────────────────────────────────────────────────────────────────────
-INDEX_DIR  = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\DATA\INDEX")
-MODEL_PATH = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\models\deepseek-r1-qwen3-8b")
-
-EMBED_MODEL   = "BAAI/bge-large-en-v1.5"
-RERANK_MODEL  = "BAAI/bge-reranker-v2-m3"   # re-enabled
-EMBED_DIM     = 1024
-EMBED_DEVICE  = "cpu"
-RERANK_DEVICE = "cuda:0"
-
-FAISS_TOP_K   = 20    # candidates from each retriever before fusion
-RERANK_TOP_N  = 4     # keep top N after reranker
-CONTEXT_WINDOW = 0    # adjacent chunk expansion (keep 0 for VRAM safety)
-
-MAX_NEW_TOKENS = 2048
-DO_SAMPLE      = False
-
-# conversation memory — keep last N turns
-MAX_HISTORY    = 4
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  DATA CLASSES
-# ══════════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class RetrievedChunk:
-    chunk_id:     str
-    doc_id:       str
-    source_file:  str
-    page_start:   int
-    page_end:     int
-    section_path: list[str]
-    heading:      Optional[str]
-    text:         str
-    score:        float
-    rerank_score: Optional[float] = None
-    has_table:    bool = False
-    has_formula:  bool = False
-
-
-@dataclass
-class RAGResult:
-    query:   str
-    answer:  str
-    chunks:  list[RetrievedChunk] = field(default_factory=list)
-    latency: dict = field(default_factory=dict)
+from config import (
+    INDEX_DIR, MODEL_PATH, EMBED_MODEL, RERANK_MODEL, EMBED_DIM,
+    EMBED_DEVICE, RERANK_DEVICE, FAISS_TOP_K, RERANK_TOP_N, CONTEXT_WINDOW,
+    MAX_NEW_TOKENS, DO_SAMPLE, MAX_HISTORY
+)
+from models import RetrievedChunk, RAGResult
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -407,6 +366,9 @@ class RAGEngine:
         ).to("cuda:0")
 
         input_len = inputs["input_ids"].shape[1]
+        
+        # Add a streamer so we can see the text being generated in real-time
+        streamer = TextStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=False)
 
         with torch.no_grad():
             output_ids = self.llm.generate(
@@ -416,6 +378,7 @@ class RAGEngine:
                 pad_token_id=self.tokenizer.eos_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
                 repetition_penalty=1.05,
+                streamer=streamer,
             )
 
         generated_ids = output_ids[0][input_len:]

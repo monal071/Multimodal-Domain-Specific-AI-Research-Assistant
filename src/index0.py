@@ -16,19 +16,11 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-# ── config ─────────────────────────────────────────────────────────────────────
-PARSED_DIR  = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\DATA\PARSED DATA")
-INDEX_DIR   = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)\DATA\INDEX")
-
-# In build_index.py, change:
-EMBED_MODEL = "BAAI/bge-large-en-v1.5"   # match rag_query.py
-EMBED_DIM   = 1024                         # same dim, no other changes
-EMBED_BATCH = 16                           # safe for 8GB
+from config import PARSED_DIR, INDEX_DIR, EMBED_MODEL, EMBED_DIM, EMBED_BATCH, NPROBE
 
 # FAISS: IVFFlat — fast approximate search
 # nlist = number of Voronoi cells; sqrt(N) is a good heuristic
 # We'll set it after counting total chunks
-NPROBE      = 32                      # cells to search at query time (speed/recall tradeoff)
 
 INDEX_DIR.mkdir(exist_ok=True, parents=True)
 
