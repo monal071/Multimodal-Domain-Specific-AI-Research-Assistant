@@ -21,11 +21,11 @@ A domain-specific research assistant implementing a high-performance Retrieval-A
    - **Reranking**: Scores and filters top results using a cross-encoder model (`BAAI/bge-reranker-v2-m3`).
    - **Context Expansion**: Optional adjacent-chunk lookup using document structural indices.
 
-4. **Quantized Local Generation**:
-   - Implements a conversational answer engine using **DeepSeek-R1-Distill-Qwen-8B** quantized to 4-bit precision (`bitsandbytes` `nf4`).
-   - Streams generation directly to the console in real-time using HuggingFace `TextStreamer`.
+4. **Local Generation via Ollama**:
+   - Implements a conversational answer engine using **DeepSeek-R1** hosted locally via Ollama.
+   - Streams generation directly to the web interface in real-time.
    - Conversational memory window to resolve multi-turn context (e.g., "that", "this method").
-   - VRAM-optimized design (Reranker mapped to CPU to prevent out-of-memory errors on 8GB GPUs).
+   - VRAM-optimized design (Reranker mapped to CPU, LLM managed by Ollama).
 
 ---
 
@@ -44,7 +44,8 @@ A domain-specific research assistant implementing a high-performance Retrieval-A
 │   ├── models.py                       # Shared data classes (RAGResult, RetrievedChunk)
 │   ├── ingestion.py                    # PDF parser & custom chunker
 │   ├── index0.py                       # Embedding generator & FAISS index builder
-│   └── index.py                        # Conversational query engine with hybrid retrieval
+│   ├── index.py                        # Core RAG Engine (Hybrid Search + Reranker)
+│   └── gradio_app.py                   # Interactive Web UI (Gradio)
 ├── .gitignore                          # Exclusions for large models, indexes, and environments
 ├── requirements.txt                    # Project dependencies
 └── README.md                           # Documentation
