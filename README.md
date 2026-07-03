@@ -89,12 +89,9 @@ python src/index0.py
 ```
 This script runs BGE embedding on CUDA, creates a FAISS index, builds a BM25 lookup database, and saves the retrieval assets to `DATA/INDEX/`.
 
-### Step 3: Run the Query Assistant CLI
-Launch the interactive CLI interface to chat with your document repository:
+### Step 3: Run the Web Interface
+Launch the interactive web UI to chat with your document repository:
 ```bash
-python src/index.py
+python src/gradio_app.py
 ```
-- Type your question at the `>>>` prompt.
-- Prefix your question with `norewrite ` to bypass the DeepSeek query-rewriting step.
-- Type `clear` to reset conversational memory.
-- Type `exit` to exit the session.
+This will open a local web server (typically `http://localhost:7861`) in your browser. You can view sources, toggle query rewriting, and chat interactively.

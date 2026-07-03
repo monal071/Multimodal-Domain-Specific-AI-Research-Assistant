@@ -16,3 +16,5 @@ rank-bm25>=0.2.2
 # Utilities
 numpy
 tqdm
+gradio>=4.0.0
+requests

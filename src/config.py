@@ -19,7 +19,7 @@ NPROBE      = 32
 
 # ── Query Engine Settings ─────────────────────────────────────────────────────
 EMBED_DEVICE  = "cpu"
-RERANK_DEVICE = "cuda"
+RERANK_DEVICE = "cpu"
 
 FAISS_TOP_K    = 20
 RERANK_TOP_N   = 4

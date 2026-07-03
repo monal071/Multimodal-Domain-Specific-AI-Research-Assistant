@@ -16,7 +16,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from config import PARSED_DIR, INDEX_DIR, EMBED_MODEL, EMBED_DIM, EMBED_BATCH, NPROBE
+from config import PARSED_DIR, INDEX_DIR, EMBED_MODEL, EMBED_DIM, EMBED_BATCH, NPROBE, EMBED_DEVICE
 
 # FAISS: IVFFlat — fast approximate search
 # nlist = number of Voronoi cells; sqrt(N) is a good heuristic
@@ -42,7 +42,7 @@ if not all_chunks:
 
 # ── embed ──────────────────────────────────────────────────────────────────────
 print(f"Loading embedding model: {EMBED_MODEL} …")
-embedder = SentenceTransformer(EMBED_MODEL, device="cuda")
+embedder = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE)
 
 # BGE models work best with a query prefix; for indexing use passage prefix
 texts = [
