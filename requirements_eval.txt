@@ -1,0 +1,12 @@
+# RAGAS Evaluation Suite — extra dependencies
+# Install with: pip install -r requirements_eval.txt
+
+# RAGAS evaluation framework
+ragas>=0.2.0
+
+# LangChain adapters (RAGAS judge LLM + embeddings)
+langchain-ollama>=0.1.0
+langchain-huggingface>=0.0.3
+
+# Required by langchain-huggingface
+sentence-transformers>=3.0.0    # already in requirements.txt, listed for clarity

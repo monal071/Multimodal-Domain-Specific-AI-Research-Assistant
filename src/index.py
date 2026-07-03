@@ -1,34 +1,35 @@
 """
 RAG Pipeline — Query Engine with Hybrid Retrieval
   - BM25 + FAISS with Reciprocal Rank Fusion
-  - BGE embeddings on CPU, DeepSeek 4-bit on GPU
+  - BGE embeddings on CPU, DeepSeek via Ollama (llama.cpp)
   - Reranker re-enabled
   - Query rewriting added
   - Conversation memory added
 """
 
+import json
 import os
 import pickle
 import string
+import sys
 import textwrap
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+import requests
 
 import faiss
 import numpy as np
-import torch
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextStreamer
 
 from config import (
-    INDEX_DIR, MODEL_PATH, EMBED_MODEL, RERANK_MODEL, EMBED_DIM,
+    INDEX_DIR, EMBED_MODEL, RERANK_MODEL, EMBED_DIM,
     EMBED_DEVICE, RERANK_DEVICE, FAISS_TOP_K, RERANK_TOP_N, CONTEXT_WINDOW,
-    MAX_NEW_TOKENS, DO_SAMPLE, MAX_HISTORY
+    MAX_NEW_TOKENS, MAX_HISTORY,
+    OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT,
 )
 from models import RetrievedChunk, RAGResult
 
@@ -158,24 +159,23 @@ class RAGEngine:
             self.reranker = CrossEncoder(RERANK_MODEL, device=RERANK_DEVICE, max_length=512)
             print(f"[3b]  Reranker           ({RERANK_MODEL})  {time.time()-t0:.1f}s")
 
-        # ── DeepSeek 4-bit on GPU ────────────────────────────────
+        # ── Ollama health-check ──────────────────────────────────────────
         t0 = time.time()
-        print(f"[4/5] Loading LLM (4-bit): {MODEL_PATH.name} ...")
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-        )
-        self.tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH), trust_remote_code=True)
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            str(MODEL_PATH),
-            quantization_config=bnb_config,
-            device_map={"": 0},
-            trust_remote_code=True,
-        )
-        self.llm.eval()
-        print(f"      LLM loaded  {time.time()-t0:.1f}s")
+        print(f"[4/5] Connecting to Ollama ({OLLAMA_URL}) model={OLLAMA_MODEL} ...")
+        try:
+            resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+            resp.raise_for_status()
+            available = [m["name"] for m in resp.json().get("models", [])]
+            if not any(OLLAMA_MODEL in m for m in available):
+                print(f"  WARNING: '{OLLAMA_MODEL}' not found in Ollama.")
+                print(f"  Run:  ollama pull {OLLAMA_MODEL}")
+                print(f"  Available models: {available}")
+            else:
+                print(f"      OK — model ready  {time.time()-t0:.1f}s")
+        except requests.exceptions.ConnectionError:
+            print(f"\n  ERROR: Cannot reach Ollama at {OLLAMA_URL}")
+            print(f"  Make sure Ollama is running:  ollama serve")
+            sys.exit(1)
 
         # ── Conversation memory ──────────────────────────────────
         self._history: list[dict] = []   # {"question": ..., "answer": ...}
@@ -184,42 +184,45 @@ class RAGEngine:
         print("Ready\n")
 
     # ──────────────────────────────────────────────────────────────
+    
     #  QUERY REWRITING
     # ──────────────────────────────────────────────────────────────
 
     def _rewrite_query(self, question: str) -> str:
         """
-        Use DeepSeek to rewrite the user query into better search terms.
+        Use Ollama to rewrite the user query into better search terms.
         Short, fast generation — max 60 tokens.
         """
-        prompt = self.tokenizer.apply_chat_template(
-            [{
-                "role": "user",
-                "content": (
-                    f"Rewrite this question as a precise academic search query "
-                    f"with key technical terms only. Output the rewritten query only, "
-                    f"no explanation.\n\nQuestion: {question}\n\nRewritten query:"
-                )
-            }],
-            tokenize=False,
-            add_generation_prompt=True,
+        prompt = (
+            f"Rewrite this question as a precise academic search query "
+            f"with key technical terms only. Output the rewritten query only, "
+            f"no explanation.\n\nQuestion: {question}\n\nRewritten query:"
         )
-        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).to("cuda:0")
-        with torch.no_grad():
-            out = self.llm.generate(
-                **inputs,
-                max_new_tokens=60,
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id,
+        try:
+            resp = requests.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={
+                    "model":  OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "num_predict": 60,
+                        "temperature": 0.0,
+                    },
+                },
+                timeout=OLLAMA_TIMEOUT,
             )
-        new_tokens = out[0][inputs["input_ids"].shape[1]:]
-        rewritten  = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+            resp.raise_for_status()
+            rewritten = resp.json().get("response", "").strip()
+        except requests.exceptions.RequestException as e:
+            print(f"  [rewrite] Ollama error: {e} — using original query")
+            return question
 
-        # strip any think tags
+        # strip DeepSeek <think> tags if present
         if "<think>" in rewritten:
             rewritten = rewritten.split("</think>")[-1].strip()
 
-        # fallback to original if rewrite is empty or too long
+        # fallback to original if rewrite is empty or suspiciously long
         if not rewritten or len(rewritten) > 200:
             return question
 
@@ -347,46 +350,52 @@ class RAGEngine:
         user_parts.append(f"\n=== QUESTION ===\n{query}")
         user_parts.append("\n=== ANSWER ===")
 
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": "\n".join(user_parts)},
-        ]
-        return self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        # Plain-text prompt — Ollama's /api/generate accepts raw text.
+        # The model’s system instruction is prepended as a clear header.
+        return f"### SYSTEM\n{system}\n\n### USER\n" + "\n".join(user_parts) + "\n\n### ASSISTANT\n"
 
     # ──────────────────────────────────────────────────────────────
     #  GENERATION
     # ──────────────────────────────────────────────────────────────
 
     def _generate(self, prompt: str) -> str:
-        torch.cuda.empty_cache()
-        inputs = self.tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=2048
-        ).to("cuda:0")
+        """
+        Stream tokens from Ollama and print them as they arrive,
+        mimicking the old TextStreamer behaviour.
+        """
+        answer_parts: list[str] = []
+        try:
+            with requests.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={
+                    "model":  OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": True,
+                    "options": {
+                        "num_predict": MAX_NEW_TOKENS,
+                        "temperature": 0.0,
+                        "repeat_penalty": 1.05,
+                    },
+                },
+                timeout=OLLAMA_TIMEOUT,
+                stream=True,
+            ) as resp:
+                resp.raise_for_status()
+                for raw_line in resp.iter_lines():
+                    if not raw_line:
+                        continue
+                    chunk = json.loads(raw_line)
+                    token = chunk.get("response", "")
+                    if token:
+                        print(token, end="", flush=True)
+                        answer_parts.append(token)
+                    if chunk.get("done"):
+                        break
+        except requests.exceptions.RequestException as e:
+            return f"[Ollama error: {e}]"
 
-        input_len = inputs["input_ids"].shape[1]
-        
-        # Add a streamer so we can see the text being generated in real-time
-        streamer = TextStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=False)
-
-        with torch.no_grad():
-            output_ids = self.llm.generate(
-                **inputs,
-                max_new_tokens=MAX_NEW_TOKENS,
-                do_sample=DO_SAMPLE,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                repetition_penalty=1.05,
-                streamer=streamer,
-            )
-
-        generated_ids = output_ids[0][input_len:]
-        answer = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-        # fix BPE space/newline artifacts
-        if "\u0120" in answer or "\u010a" in answer:
-            answer = answer.replace("\u0120", " ").replace("\u010a", "\n")
+        print()  # newline after streamed output
+        answer = "".join(answer_parts).strip()
 
         # strip DeepSeek-R1 chain-of-thought safely
         if "<think>" in answer:
@@ -395,7 +404,7 @@ class RAGEngine:
             else:
                 answer = "[Generation cut off during thinking. Please increase MAX_NEW_TOKENS.]"
 
-        return answer.strip()
+        return answer
 
     # ──────────────────────────────────────────────────────────────
     #  PUBLIC API

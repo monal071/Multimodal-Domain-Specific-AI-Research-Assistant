@@ -6,7 +6,7 @@ BASE_DIR = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (
 PDF_DIR    = BASE_DIR / "raw data" / "papers"
 PARSED_DIR = BASE_DIR / "DATA" / "PARSED DATA"
 INDEX_DIR  = BASE_DIR / "DATA" / "INDEX"
-MODEL_PATH = BASE_DIR / "models" / "deepseek-r1-qwen3-8b"
+# MODEL_PATH is no longer needed — Ollama manages the model file
 
 # ── Models ────────────────────────────────────────────────────────────────────
 EMBED_MODEL  = "BAAI/bge-large-en-v1.5"
@@ -19,12 +19,16 @@ NPROBE      = 32
 
 # ── Query Engine Settings ─────────────────────────────────────────────────────
 EMBED_DEVICE  = "cpu"
-RERANK_DEVICE = "cpu"
+RERANK_DEVICE = "cuda"
 
 FAISS_TOP_K    = 20
 RERANK_TOP_N   = 4
 CONTEXT_WINDOW = 0
 
+# ── Ollama Settings ──────────────────────────────────────────────────────────
+OLLAMA_URL   = "http://localhost:11434"   # default Ollama address
+OLLAMA_MODEL = "deepseek-r1:8b"           # model tag as shown in `ollama list`
+OLLAMA_TIMEOUT = 300                      # seconds; raise if you use a big model
+
 MAX_NEW_TOKENS = 2048
-DO_SAMPLE      = False
 MAX_HISTORY    = 4
