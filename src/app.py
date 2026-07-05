@@ -20,7 +20,7 @@ sys.path.insert(0, str(SRC_DIR))
 import gradio as gr
 import requests as _req
 from config import OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, MAX_NEW_TOKENS
-from index import RAGEngine
+from rag_engine import RAGEngine
 
 # ── Load engine once at startup ───────────────────────────────────────────────
 print("Loading RAG engine...")

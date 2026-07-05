@@ -3,7 +3,7 @@ from pathlib import Path
 BASE_DIR = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)")
 
 # ── Data Directories ──────────────────────────────────────────────────────────
-PDF_DIR    = BASE_DIR / "raw data" / "papers"
+PDF_DIR    = BASE_DIR / "DATA" / "raw data" / "papers"
 PARSED_DIR = BASE_DIR / "DATA" / "PARSED DATA"
 INDEX_DIR  = BASE_DIR / "DATA" / "INDEX"
 # MODEL_PATH is no longer needed — Ollama manages the model file
@@ -21,7 +21,7 @@ NPROBE      = 32
 EMBED_DEVICE  = "cpu"
 RERANK_DEVICE = "cpu"
 
-FAISS_TOP_K    = 20
+FAISS_TOP_K    = 50
 RERANK_TOP_N   = 4
 CONTEXT_WINDOW = 0
 
@@ -32,3 +32,10 @@ OLLAMA_TIMEOUT = 300                      # seconds; raise if you use a big mode
 
 MAX_NEW_TOKENS = 2048
 MAX_HISTORY    = 4
+
+# ── Fine-Tuning Settings ──────────────────────────────────────────────────────
+FT_DATASET_PATH = BASE_DIR / "DATA" / "finetune" / "synthetic_qa_dataset.json"
+FT_OUTPUT_DIR   = BASE_DIR / "DATA" / "models" / "lora-adapter"
+FT_MODEL_ID     = "meta-llama/Meta-Llama-3-8B-Instruct"
+FT_BATCH_SIZE   = 2
+FT_EPOCHS       = 3

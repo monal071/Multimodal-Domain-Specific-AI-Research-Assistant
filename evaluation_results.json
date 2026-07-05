@@ -1,0 +1,52 @@
+[
+    {
+        "question": "What was the estimated number of households supported by products from *A*. *speciosa* throughout Brazil in 1985?",
+        "ground_truth_chunk_id": "190102860v3_0070_268a712b",
+        "ground_truth_text": "= = Uses = =\n&lt;unk&gt; species have a long history of human utilisation. &lt;unk&gt; &lt;unk&gt; &lt;unk&gt; seeds have been found in archaeological sites in Colombia dating back to 9000 BP. A variety of species remain important sources of edible oil, thatch, edible seeds and fibre. The leaves of &lt;unk&gt; &lt;unk&gt; and A. &lt;unk&gt; are used extensively for thatching. Several species are oil palms, with A. speciosa among the most important economically. Products extracted from A. speciosa were reported to support over 300,000 households in the Brazilian state of Maranh\u00e3o in 2005, and in 1985 it was estimated to support over 450,000 households throughout the Brazil. &lt;unk&gt; fibres, extracted from the leaf bases of A. &lt;unk&gt;, are commercially important, and generated about US $",
+        "source_file": "1901.02860v3",
+        "retrieval_rank": 1,
+        "generated_answer": "In 1985, it was estimated to support over **450,000 households** throughout Brazil (Source: 1901.02860v3).",
+        "faithfulness_score": null,
+        "relevance_score": 5
+    },
+    {
+        "question": "How many parameters does the Pathways Language Model (PaLM) have?",
+        "ground_truth_chunk_id": "PaLM_Scaling_Language_Modeling_with_Pathways_0010_3c3f13d5",
+        "ground_truth_text": "In this work, we continue the scaling line of language modeling improvements and train a 540 billion parameter, densely activated, autoregressive Transformer on 780 billion tokens of high-quality text. This was achieved through the use of Pathways (Barham et al., 2022), a new ML system which enables highly efficient training of very large neural networks across thousands of accelerator chips, including those spanning multiple Tensor Processing Units (TPU) v4 Pods. This new model, called Pathways Language Model (PaLM), achieves state-of-the-art few-shot results across hundreds of natural language, code, and mathematical reasoning tasks. We achieve breakthrough performance on a number of these tasks.\nThe key takeaways from this work are as follows:",
+        "source_file": "PaLM: Scaling Language Modeling with Pathways",
+        "retrieval_rank": null,
+        "generated_answer": "The Pathways Language Model (PaLM) has **540 billion** parameters.\n\nThis is explicitly stated in multiple places within the provided context:\n*   `[Abstract]` mentions \"a 540-billion parameter...\"\n*   `[1 Introduction]` states \"...train a 540 billion parameter...\"\n*   `[14 Conclusion]` confirms \"...training PaLM, a 540B parameter dense Transformer language model...\"",
+        "faithfulness_score": 5,
+        "relevance_score": 5
+    },
+    {
+        "question": "What was the publication year for the paper on training neural networks with fixed sparse masks?",
+        "ground_truth_chunk_id": "QL_RA_Efficient_Finetuning_of_Quantized_LLMs_0063_a52be9ee",
+        "ground_truth_text": "- [53] S. Shaphiro and M. Wilk. An analysis of variance test for normality. Biometrika , 52(3):591-611, 1965.\n- [54] Y.-L. Sung, V. Nair, and C. A. Raffel. Training neural networks with fixed sparse masks. Advances in Neural Information Processing Systems , 34:24193-24205, 2021.\n- [55] R. Taori, I. Gulrajani, T. Zhang, Y. Dubois, X. Li, C. Guestrin, P. Liang, and T. B. Hashimoto. Stanford alpaca: An instruction-following llama model. https://github.com/tatsu-lab/ stanford\\_alpaca , 2023.\n- [56] R. Thoppilan, D. De Freitas, J. Hall, N. Shazeer, A. Kulshreshtha, H.-T. Cheng, A. Jin, T. Bos, L. Baker, Y. Du, et al. Lamda: Language models for dialog applications. arXiv preprint arXiv:2201.08239 , 2022.\n- [57] H. Touvron, T. Lavril, G. Izacard, X. Martinet, M.-A. Lachaux, T. Lacroix, B. Rozi\u00e8re, N. Goyal, E. Hambro, F. Azhar, et al. Llama: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971 , 2023.\n- [58] A. Wang, A. Singh, J. Michael, F. Hill, O. Levy, and S. R. Bowman. Glue: A multitask benchmark and analysis platform for natural language understanding. arXiv preprint arXiv:1804.07461 , 2018.",
+        "source_file": "QL RA: Efficient Finetuning of Quantized LLMs",
+        "retrieval_rank": null,
+        "generated_answer": "According to **Source [54]**:  \nY.-L. Sung, V. Nair, and C. A. Raffel. Training neural networks with fixed sparse masks. *Advances in Neural Information Processing Systems*, 34:24193-24205, 2021.\n\nThe publication year is **2021**.",
+        "faithfulness_score": 5,
+        "relevance_score": 5
+    },
+    {
+        "question": "What information does the compiler infrastructure use to partition the computation graph?",
+        "ground_truth_chunk_id": "GShard_Scaling_Giant_Models_with_Conditional_Computation_and_Automatic_Sharding_0033_91617a5c",
+        "ground_truth_text": "This section describes the compiler infrastructure that automatically partitions a computation graph based on sharding annotations. Sharding annotations inform the compiler about how each tensor should be distributed across devices. The SPMD (Single Program Multiple Data) partitioner (or 'partitioner' for simplicity) is a compiler component that transforms a computation graph into a single program to be executed on all devices in parallel. This makes the compilation time near constant regardless of the number of partitions, which allows us to scale to thousands of partitions. 4",
+        "source_file": "GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding",
+        "retrieval_rank": 2,
+        "generated_answer": "The compiler infrastructure uses **sharding annotations** to determine how each tensor should be distributed across devices.\n\nThis information is explicitly stated in Section 3.3 (\"[3.3 The XLA SPMD Partitioner for GShard]\"), where it says: \"Sharding annotations inform the compiler about how each tensor should be distributed across devices.\"",
+        "faithfulness_score": 5,
+        "relevance_score": null
+    },
+    {
+        "question": "What was the original Stanford Question Answering Dataset (SQuAD) designed to do?",
+        "ground_truth_chunk_id": "ALBERT_A_L_BERT_S_0044_00a820e7",
+        "ground_truth_text": "- Pranav Rajpurkar, Jian Zhang, Konstantin Lopyrev, and Percy Liang. SQuAD: 100,000+ questions for machine comprehension of text. In Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing , pp. 2383-2392, Austin, Texas, November 2016. Association for Computational Linguistics. doi: 10.18653/v1/D16-1264. URL https://www.aclweb. org/anthology/D16-1264 .\n- Pranav Rajpurkar, Robin Jia, and Percy Liang. Know what you don't know: Unanswerable questions for SQuAD. In Proceedings of the 56th Annual Meeting of the Association for Computational Linguistics (Volume 2: Short Papers) , pp. 784-789, Melbourne, Australia, July 2018. Association for Computational Linguistics. doi: 10.18653/v1/P18-2124. URL https://www.aclweb. org/anthology/P18-2124 .\n- Noam Shazeer, Youlong Cheng, Niki Parmar, Dustin Tran, Ashish Vaswani, Penporn Koanantakool, Peter Hawkins, HyoukJoong Lee, Mingsheng Hong, Cliff Young, et al. Mesh-tensorflow: Deep learning for supercomputers. In Advances in Neural Information Processing Systems , pp. 1041410423, 2018.",
+        "source_file": "ALBERT: A L BERT S -",
+        "retrieval_rank": null,
+        "generated_answer": "The Stanford Question Answering Dataset (SQuAD) was designed to provide a benchmark for **extractive question answering**. Specifically, it involves:\n\n*   Given a question and a Wikipedia passage containing the answer, predict the exact span of text in the passage that constitutes the answer.\n\nThis is explicitly stated in multiple sources:\n*   In `BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding`, SQuAD v1.1 is described as evaluating \"predicting the answer text span\".\n*   In `ALBERT: A L BERT S -` and `Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer`, it's consistently referred to as an extractive question answering dataset where answers are segments from the context paragraphs.\n\n**Answer:** The original Stanford Question Answering Dataset (SQuAD) was designed for **extractive question answering**, specifically to predict the exact text span within a given passage that serves as the answer to a question.",
+        "faithfulness_score": 5,
+        "relevance_score": 5
+    }
+]

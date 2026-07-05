@@ -9,12 +9,16 @@ from typing import Optional
 import fitz
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
-    AcceleratorDevice, AcceleratorOptions, ThreadedPdfPipelineOptions,
+    AcceleratorDevice, AcceleratorOptions, PdfPipelineOptions,
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
+from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
 
-from config import PDF_DIR, PARSED_DIR
+from config import PDF_DIR, PARSED_DIR, EMBED_MODEL, EMBED_DEVICE
+import nltk
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
 # ── config ─────────────────────────────────────────────────────────────────────
 TEMP_DIR   = Path("temp_chunks")
@@ -37,9 +41,9 @@ PARSED_DIR.mkdir(exist_ok=True, parents=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ── Docling pipeline ───────────────────────────────────────────────────────────
-opts = ThreadedPdfPipelineOptions(
+opts = PdfPipelineOptions(
     accelerator_options=AcceleratorOptions(device=AcceleratorDevice.CUDA),
-    layout_batch_size=4,
+    layout_batch_size=1,
     table_batch_size=4,
     ocr_batch_size=1,
 )
@@ -50,11 +54,11 @@ opts.do_code_enrichment   = False
 
 converter = DocumentConverter(format_options={
     InputFormat.PDF: PdfFormatOption(
-        pipeline_cls=ThreadedStandardPdfPipeline,
+        pipeline_cls=StandardPdfPipeline,
         pipeline_options=opts,
     )
 })
-print("Models loaded ✓\n")
+print("Models loaded [OK]\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -140,12 +144,10 @@ def _split_markdown(md: str) -> list[dict]:
     return blocks
 
 
-def _window_block(block: dict, max_chars: int, overlap_lines: int) -> list[dict]:
+def _semantic_chunker(block: dict) -> list[dict]:
     """
-    Split one section block into windows.
-    - Tables and code blocks are NEVER split.
-    - If the whole section fits in one window, return it as-is (NO overlap).
-    - Only use overlap when we actually need to split.
+    Splits a section block into chunks by isolating tables/code 
+    and using cosine similarity between sentences for natural text.
     """
     text   = block["text"]
     hstack = block["heading_stack"]
@@ -153,61 +155,145 @@ def _window_block(block: dict, max_chars: int, overlap_lines: int) -> list[dict]
     has_table = bool(_TABLE_ROW.search(text))
     has_code  = "```" in text
 
-    # atomic blocks — never split
-    if has_table or has_code:
-        if len(text) >= MIN_CHARS:
-            return [{**block, "has_table": has_table, "has_code": has_code}]
-        return []
-
-    # fits in one window — no overlap needed
-    if len(text) <= max_chars:
+    # Fast path if it fits entirely in one chunk
+    if len(text) <= MAX_CHARS and not has_table and not has_code:
         return [block] if len(text) >= MIN_CHARS else []
 
-    # needs splitting — use sliding window with overlap
-    lines   = text.splitlines()
+    # 1. Isolate tables and code
+    lines = text.splitlines()
+    sub_blocks = []
+    current_type = None
+    current_lines = []
+    in_code = False
+    
+    for line in lines:
+        if _CODE_FENCE.match(line):
+            if not in_code:
+                if current_lines:
+                    sub_blocks.append({"type": current_type or "text", "lines": current_lines})
+                current_lines = [line]
+                current_type = "code"
+                in_code = True
+            else:
+                current_lines.append(line)
+                sub_blocks.append({"type": "code", "lines": current_lines})
+                current_lines = []
+                current_type = None
+                in_code = False
+            continue
+            
+        if in_code:
+            current_lines.append(line)
+            continue
+            
+        if bool(_TABLE_ROW.search(line)):
+            if current_type != "table":
+                if current_lines:
+                    sub_blocks.append({"type": current_type or "text", "lines": current_lines})
+                current_lines = []
+                current_type = "table"
+            current_lines.append(line)
+        else:
+            if current_type == "table":
+                sub_blocks.append({"type": "table", "lines": current_lines})
+                current_lines = []
+                current_type = "text"
+            else:
+                current_type = "text"
+            current_lines.append(line)
+            
+    if current_lines:
+         sub_blocks.append({"type": current_type or "text", "lines": current_lines})
+
+    # 2. Process sub-blocks semantically
     windows = []
-    start   = 0
+    for sb in sub_blocks:
+        sb_text = "\n".join(sb["lines"]).strip()
+        if len(sb_text) < MIN_CHARS:
+            continue
+            
+        if sb["type"] in ["table", "code"]:
+            # Tables and code blocks are atomic
+            windows.append({
+                "heading_stack": hstack, 
+                "text": sb_text, 
+                "has_table": (sb["type"] == "table"),
+                "has_code": (sb["type"] == "code")
+            })
+            continue
 
-    while start < len(lines):
-        buf, chars = [], 0
-        i = start
-        while i < len(lines) and chars + len(lines[i]) + 1 <= max_chars:
-            buf.append(lines[i])
-            chars += len(lines[i]) + 1
-            i += 1
-
-        if not buf and i < len(lines):
-            buf.append(lines[i])
-            i += 1
-
-        chunk_text = "\n".join(buf).strip()
-        if len(chunk_text) >= MIN_CHARS:
-            windows.append({"heading_stack": hstack, "text": chunk_text})
-
-        start = max(i - overlap_lines, start + 1)
-        if i >= len(lines):
-            break
-
+        # For text, apply semantic chunking
+        try:
+            sentences = nltk.sent_tokenize(sb_text)
+        except:
+            nltk.download('punkt', quiet=True)
+            nltk.download('punkt_tab', quiet=True)
+            sentences = nltk.sent_tokenize(sb_text)
+            
+        if not sentences:
+            continue
+            
+        if len(sentences) == 1 or len(sb_text) <= 500:
+            windows.append({"heading_stack": hstack, "text": sb_text})
+            continue
+            
+        # Semantic splitting
+        global _embedder
+        if '_embedder' not in globals():
+            _embedder = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE)
+            
+        embeddings = _embedder.encode(sentences)
+        
+        similarities = []
+        for i in range(len(sentences) - 1):
+            sim = cosine_similarity([embeddings[i]], [embeddings[i+1]])[0][0]
+            similarities.append(sim)
+            
+        if not similarities:
+            windows.append({"heading_stack": hstack, "text": sb_text})
+            continue
+            
+        threshold = np.percentile(similarities, 30) # Bottom 30% are split points
+        
+        chunks = []
+        current_chunk = [sentences[0]]
+        current_len = len(sentences[0])
+        
+        for i, (sent, sim) in enumerate(zip(sentences[1:], similarities)):
+            if (sim < threshold and current_len > 300) or (current_len + len(sent) > MAX_CHARS):
+                chunks.append(" ".join(current_chunk))
+                current_chunk = [sent]
+                current_len = len(sent)
+            else:
+                current_chunk.append(sent)
+                current_len += len(sent) + 1
+                
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+            
+        for c in chunks:
+            if len(c) >= MIN_CHARS:
+                windows.append({"heading_stack": hstack, "text": c})
+                
     return windows
 
 
-def chunk_markdown(md: str, doc_id: str, source_file: str,
-                   page_start: int, page_end: int) -> list[dict]:
+def chunk_markdown(md: str, doc_id: str, source_file: str) -> list[dict]:
     blocks = _split_markdown(md)
     chunks = []
     ctr    = [0]
 
     for block in blocks:
         # skip noise headings (text samples, acknowledgements, etc.)
-        heading = block["heading_stack"][-1] if block["heading_stack"] else ""
-        if _SKIP_HEADINGS.match(heading):
+        hstack = block["heading_stack"]
+        if hstack and _SKIP_HEADINGS.match(hstack[-1]):
             continue
 
-        for win in _window_block(block, MAX_CHARS, OVERLAP_LINES):
+        for win in _semantic_chunker(block):
             text = win["text"]
             idx  = ctr[0]; ctr[0] += 1
 
-            # prefer flags pre-set by _window_block (for tables/code),
+            # prefer flags pre-set by _semantic_chunker (for tables/code),
             # fall back to _detect on the windowed text
             d = _detect(text)
             chunks.append({
@@ -215,8 +301,6 @@ def chunk_markdown(md: str, doc_id: str, source_file: str,
                 "doc_id":      doc_id,
                 "source_file": source_file,
                 "chunk_index": idx,
-                "page_start":  page_start,
-                "page_end":    page_end,
                 "section_path": win["heading_stack"],
                 "heading":     win["heading_stack"][-1] if win["heading_stack"] else None,
                 "text":        text,
@@ -261,7 +345,7 @@ def process_pdf(pdf_path: Path) -> list[dict]:
     if n_pages <= PAGE_CHUNK:
         print(f"   1/1  pages 1–{n_pages} …", end=" ", flush=True)
         md     = convert_to_md(pdf_path)
-        chunks = chunk_markdown(md, doc_id, pdf_path.name, 1, n_pages)
+        chunks = chunk_markdown(md, doc_id, pdf_path.name)
         all_chunks.extend(chunks)
         print(f"ok ({len(chunks)} chunks)")
     else:
@@ -273,7 +357,7 @@ def process_pdf(pdf_path: Path) -> list[dict]:
             try:
                 write_chunk(pdf_path, slice_path, start, end)
                 md     = convert_to_md(slice_path)
-                chunks = chunk_markdown(md, doc_id, pdf_path.name, start+1, end)
+                chunks = chunk_markdown(md, doc_id, pdf_path.name)
                 all_chunks.extend(chunks)
                 print(f"ok ({len(chunks)} chunks)")
             except Exception as e:
@@ -304,17 +388,17 @@ for pdf_path in pdfs:
         print(f"SKIP  {pdf_path.name}")
         continue
 
-    print(f"▶  {pdf_path.name}")
+    print(f">  {pdf_path.name}")
     t0 = time.time()
     try:
         chunks = process_pdf(pdf_path)
         with open(out_path, "w", encoding="utf-8") as f:
             for c in chunks:
                 f.write(json.dumps(c, ensure_ascii=False) + "\n")
-        print(f"   ✓  {len(chunks)} chunks  |  {time.time()-t0:.1f}s  →  {out_path.name}\n")
+        print(f"   [OK]  {len(chunks)} chunks  |  {time.time()-t0:.1f}s  ->  {out_path.name}\n")
     except Exception as e:
         import traceback; traceback.print_exc()
-        print(f"   ✗  FAILED — {e}\n")
+        print(f"   [FAIL]  FAILED - {e}\n")
 
 if TEMP_DIR.exists() and not any(TEMP_DIR.iterdir()):
     TEMP_DIR.rmdir()

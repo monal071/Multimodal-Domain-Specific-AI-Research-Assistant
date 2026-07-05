@@ -31,7 +31,7 @@ from config import (
     MAX_NEW_TOKENS, MAX_HISTORY,
     OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT,
 )
-from models import RetrievedChunk, RAGResult
+from schema import RetrievedChunk, RAGResult
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -68,8 +68,6 @@ def _meta_to_chunk(m: dict, score: float = 0.0) -> RetrievedChunk:
         chunk_id=m["chunk_id"],
         doc_id=m["doc_id"],
         source_file=m["source_file"],
-        page_start=m["page_start"],
-        page_end=m["page_end"],
         section_path=m.get("section_path", []),
         heading=m.get("heading"),
         text=m["text"],
@@ -173,8 +171,8 @@ class RAGEngine:
             else:
                 print(f"      OK — model ready  {time.time()-t0:.1f}s")
         except requests.exceptions.ConnectionError:
-            print(f"\n  ERROR: Cannot reach Ollama at {OLLAMA_URL}")
-            print(f"  Make sure Ollama is running:  ollama serve")
+            print(f"\n  ERROR: Cannot reach Ollama at {OLLAMA_URL}", file=sys.stderr)
+            print(f"  Make sure Ollama is running:  ollama serve", file=sys.stderr)
             sys.exit(1)
 
         # ── Conversation memory ──────────────────────────────────
@@ -188,15 +186,16 @@ class RAGEngine:
     #  QUERY REWRITING
     # ──────────────────────────────────────────────────────────────
 
-    def _rewrite_query(self, question: str) -> str:
+    def _generate_hyde_document(self, question: str) -> str:
         """
-        Use Ollama to rewrite the user query into better search terms.
-        Short, fast generation — max 60 tokens.
+        Use Ollama to generate a hypothetical answer to the user's question.
+        This provides a rich semantic document to embed for FAISS retrieval.
         """
         prompt = (
-            f"Rewrite this question as a precise academic search query "
-            f"with key technical terms only. Output the rewritten query only, "
-            f"no explanation.\n\nQuestion: {question}\n\nRewritten query:"
+            f"Please write a short, highly technical, and factual academic passage "
+            f"that directly answers the following question. Do not include any filler "
+            f"or conversational text. Just output the passage itself.\n\n"
+            f"Question: {question}\n\nPassage:"
         )
         try:
             resp = requests.post(
@@ -206,28 +205,27 @@ class RAGEngine:
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "num_predict": 60,
-                        "temperature": 0.0,
+                        "num_predict": 150,
+                        "temperature": 0.3,
                     },
                 },
                 timeout=OLLAMA_TIMEOUT,
             )
             resp.raise_for_status()
-            rewritten = resp.json().get("response", "").strip()
+            hyde_doc = resp.json().get("response", "").strip()
         except requests.exceptions.RequestException as e:
-            print(f"  [rewrite] Ollama error: {e} — using original query")
+            print(f"  [hyde] Ollama error: {e} — using original query")
             return question
 
         # strip DeepSeek <think> tags if present
-        if "<think>" in rewritten:
-            rewritten = rewritten.split("</think>")[-1].strip()
+        if "<think>" in hyde_doc:
+            hyde_doc = hyde_doc.split("</think>")[-1].strip()
 
-        # fallback to original if rewrite is empty or suspiciously long
-        if not rewritten or len(rewritten) > 200:
+        if not hyde_doc or len(hyde_doc) < 10:
             return question
 
-        print(f"        rewritten: '{rewritten}'", flush=True)
-        return rewritten
+        print(f"        HyDE snippet: '{hyde_doc[:80]}...'", flush=True)
+        return hyde_doc
 
     # ──────────────────────────────────────────────────────────────
     #  RETRIEVAL
@@ -252,8 +250,6 @@ class RAGEngine:
                 chunk_id=m["chunk_id"],
                 doc_id=m["doc_id"],
                 source_file=m["source_file"],
-                page_start=m["page_start"],
-                page_end=m["page_end"],
                 section_path=m.get("section_path", []),
                 heading=m.get("heading"),
                 text=m["text"],
@@ -309,11 +305,11 @@ class RAGEngine:
 
         parts = []
         for doc_chunks in by_doc.values():
-            doc_chunks.sort(key=lambda c: c.page_start)
+            doc_chunks.sort(key=lambda c: c.chunk_id)
             parts.append(f"### Source: {doc_chunks[0].source_file}")
             for c in doc_chunks:
                 breadcrumb = " > ".join(c.section_path) if c.section_path else "-"
-                parts.append(f"[Pages {c.page_start}-{c.page_end} | {breadcrumb}]")
+                parts.append(f"[{breadcrumb}]")
                 parts.append(c.text)
                 parts.append("")
         return "\n".join(parts).strip()
@@ -421,11 +417,11 @@ class RAGEngine:
     ) -> RAGResult:
         latency = {}
 
-        # 1. Query rewriting
-        print("  [1/5] Rewriting query ...", flush=True)
+        # 1. Generating HyDE document
+        print("  [1/5] Generating HyDE document ...", flush=True)
         t0 = time.time()
-        search_query = self._rewrite_query(question) if rewrite_query else question
-        latency["rewrite"] = time.time() - t0
+        search_query = self._generate_hyde_document(question) if rewrite_query else question
+        latency["hyde"] = time.time() - t0
 
         # 2. Embed (rewritten) query
         print("  [2/5] Embedding query ...", flush=True)
@@ -491,7 +487,7 @@ def print_result(result: RAGResult):
     for i, c in enumerate(result.chunks, 1):
         section = " > ".join(c.section_path) if c.section_path else "-"
         rscore  = f"  rerank={c.rerank_score:.3f}" if c.rerank_score is not None else ""
-        print(f"  [{i}] {c.source_file}  pp.{c.page_start}-{c.page_end}  | {section}")
+        print(f"  [{i}] {c.source_file}  | {section}")
         print(f"       rrf={c.score:.4f}{rscore}")
     print("-" * 70)
     total = sum(result.latency.values())

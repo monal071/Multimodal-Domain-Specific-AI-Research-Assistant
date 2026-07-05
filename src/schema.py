@@ -6,8 +6,6 @@ class RetrievedChunk:
     chunk_id:     str
     doc_id:       str
     source_file:  str
-    page_start:   int
-    page_end:     int
     section_path: list[str]
     heading:      Optional[str]
     text:         str

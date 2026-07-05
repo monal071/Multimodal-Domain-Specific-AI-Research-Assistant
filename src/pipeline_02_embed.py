@@ -96,8 +96,6 @@ metadata = [
         "doc_id":       c["doc_id"],
         "source_file":  c["source_file"],
         "chunk_index":  c["chunk_index"],
-        "page_start":   c["page_start"],
-        "page_end":     c["page_end"],
         "section_path": c.get("section_path", []),
         "heading":      c.get("heading"),
         "text":         c["text"],          # kept for context assembly
