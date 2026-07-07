@@ -111,12 +111,16 @@ def evaluate_retrieval(dataset: list[dict], engine: RAGEngine, top_k: int = 5):
     hits = 0
     mrr_sum = 0.0
     
+    # Save original mock
+    original_mock = getattr(engine, "_generate", None)
+    engine._generate = lambda p: ""
+
     for item in tqdm(dataset, desc="Evaluating Retrieval"):
         question = item["question"]
         gt_chunk_id = item["ground_truth_chunk_id"]
         
         # Run retrieval (using hybrid search)
-        result = engine.query(question, top_k=top_k, top_n=top_k, verbose=False)
+        result = engine.query(question, top_k=top_k, top_n=top_k, verbose=False, rewrite_query=False)
         retrieved_ids = [c.chunk_id for c in result.chunks]
         
         # Calculate Hit Rate and MRR
@@ -130,11 +134,13 @@ def evaluate_retrieval(dataset: list[dict], engine: RAGEngine, top_k: int = 5):
             
     if not dataset:
         print("Dataset is empty. Skipping retrieval evaluation.")
+        if original_mock: engine._generate = original_mock
         return 0.0, 0.0
         
     hit_rate = hits / len(dataset)
     mrr = mrr_sum / len(dataset)
     
+    if original_mock: engine._generate = original_mock
     print(f"Retrieval Hit Rate @ {top_k}: {hit_rate:.2%}")
     print(f"Retrieval MRR @ {top_k}:      {mrr:.4f}")
     return hit_rate, mrr
@@ -156,7 +162,7 @@ def evaluate_generation(dataset: list[dict], engine: RAGEngine, judge_model: str
         # 1. Generate Answer using RAG
         # Force a fresh history for each eval
         engine.clear_history()
-        result = engine.query(question, verbose=False)
+        result = engine.query(question, verbose=False, rewrite_query=False)
         answer = result.answer
         context = "\n".join([c.text for c in result.chunks])
         

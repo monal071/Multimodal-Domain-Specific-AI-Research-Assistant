@@ -18,8 +18,8 @@ EMBED_BATCH = 16
 NPROBE      = 32
 
 # ── Query Engine Settings ─────────────────────────────────────────────────────
-EMBED_DEVICE  = "cpu"
-RERANK_DEVICE = "cpu"
+EMBED_DEVICE  = "cuda"
+RERANK_DEVICE = "cuda"
 
 FAISS_TOP_K    = 50
 RERANK_TOP_N   = 4

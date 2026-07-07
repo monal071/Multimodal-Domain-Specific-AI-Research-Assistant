@@ -45,7 +45,7 @@ def chat(message: str, history: list, rewrite: bool):
         return
 
     # ── 1. Rewrite query ──────────────────────────────────────────────────────
-    search_query = engine._rewrite_query(message) if rewrite else message
+    search_query = engine._generate_hyde_document(message) if rewrite else message
     rewrite_note = (
         f"*↩ Rewritten as: `{search_query}`*\n\n"
         if rewrite and search_query != message else ""
@@ -64,7 +64,7 @@ def chat(message: str, history: list, rewrite: bool):
         rrank     = f" · Rerank `{c.rerank_score:.3f}`" if c.rerank_score is not None else ""
         flags     = (" · `table`" if c.has_table else "") + (" · `formula`" if c.has_formula else "")
         sources_md += (
-            f"**[{i}] {c.source_file}** — pp. {c.page_start}–{c.page_end}\n"
+            f"**[{i}] {c.source_file}**\n"
             f"*{section}* · {rrf}{rrank}{flags}\n\n"
             f"> {c.text[:300].replace(chr(10), ' ')}{'…' if len(c.text) > 300 else ''}\n\n"
             "---\n\n"
