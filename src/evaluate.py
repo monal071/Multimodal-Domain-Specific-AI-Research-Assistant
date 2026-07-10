@@ -1,272 +1,205 @@
 """
-RAG Evaluation Script
-Evaluates Retrieval (Hit Rate, MRR) and Generation (Faithfulness, Relevance)
-using an LLM-as-a-judge approach.
+RAG Evaluation with RAGAS
+  - TestsetGenerator  : builds QA dataset from your chunks
+  - ragas.evaluate()  : Faithfulness, AnswerRelevancy, ContextPrecision,
+                        ContextRecall, AnswerCorrectness
+  - Custom            : Hit Rate @ K, MRR @ K  (chunk-ID retrieval)
+
+Run: python src/evaluate.py
 """
-
-import json
-import os
-import pickle
-import random
-import textwrap
-import time
+import contextlib, io, json, os, pickle, sys, time, types, warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # safe Unicode on Windows
 from pathlib import Path
-from typing import Optional
 
-import requests
-from tqdm import tqdm
+# ── Windows asyncio fix (RAGAS uses async; ProactorEventLoop causes crashes) ──
+import asyncio
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from config import INDEX_DIR, OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT
+# ── Load .env for local API keys (safe: ignored if file missing) ───────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env", override=False)
+except ImportError:
+    pass  # python-dotenv not installed — set env vars manually
+
+# ── Compatibility shim ─────────────────────────────────────────────────────────
+# ragas 0.4.3 imports ChatVertexAI from langchain_community which removed it in 0.4.x
+_stub = types.ModuleType("langchain_community.chat_models.vertexai")
+class _ChatVertexAI: pass
+_stub.ChatVertexAI = _ChatVertexAI
+sys.modules.setdefault("langchain_community.chat_models.vertexai", _stub)
+# ──────────────────────────────────────────────────────────────────────────────
+from datetime import datetime
+
+sys.path.insert(0, str(Path(__file__).parent))
+from config import INDEX_DIR, OLLAMA_URL, OLLAMA_MODEL, EMBED_MODEL
 from rag_engine import RAGEngine
 
-EVAL_DATASET_PATH = Path("evaluation_dataset.json")
+BASE  = Path(__file__).parent.parent
+DATA  = BASE / "evaluation_dataset.json"
+OUT   = BASE / "evaluation_results.json"
+STALE = 7  # days before auto-regenerating dataset
 
-def _query_ollama(prompt: str, model: str = OLLAMA_MODEL, max_tokens: int = 500, temperature: float = 0.0) -> str:
-    """Helper to query Ollama synchronously."""
-    try:
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "num_predict": max_tokens,
-                    "temperature": temperature,
-                },
-            },
-            timeout=OLLAMA_TIMEOUT,
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _llm():
+    """Judge LLM: Groq llama-3.3-70b-versatile (free tier)."""
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY not set.\n"
+            "  • Get a free key at: https://console.groq.com/keys\n"
+            "  • Add it to your .env file: GROQ_API_KEY=gsk_..."
         )
-        resp.raise_for_status()
-        result = resp.json().get("response", "").strip()
-        
-        # strip DeepSeek <think> tags if present
-        if "<think>" in result and "</think>" in result:
-            result = result.split("</think>")[-1].strip()
-        return result
-    except Exception as e:
-        print(f"[Ollama Error] {e}")
-        return ""
+    from langchain_groq import ChatGroq
+    return ChatGroq(model="llama-3.3-70b-versatile", temperature=0,
+                    api_key=api_key), "groq-llama-3.3-70b"
 
+def _emb():
+    from langchain_huggingface import HuggingFaceEmbeddings
+    return HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device": "cpu"})
 
-def generate_synthetic_dataset(num_samples: int = 10, save_path: Path = EVAL_DATASET_PATH):
+def _stale():
+    """Only regenerate if dataset is missing or too small."""
+    if not DATA.exists(): return True
+    try: return len(json.loads(DATA.read_text())) < 5
+    except: return True
+
+# ── Step 1: Dataset ────────────────────────────────────────────────────────────
+
+def generate_dataset(n=20):
     """
-    Randomly selects chunks and uses Ollama to generate a question 
-    that the chunk perfectly answers.
+    Generate a QA evaluation dataset by asking the judge LLM to produce
+    a question + reference answer from each sampled chunk.
+
+    Uses direct LLM calls instead of RAGAS TestsetGenerator to avoid
+    JSON-parsing failures with open-source models (Llama, Mixtral, etc.)
+    that wrap their JSON output in conversational text.
     """
-    print(f"Generating {num_samples} synthetic evaluation questions...")
-    
-    with open(INDEX_DIR / "metadata.pkl", "rb") as f:
-        metadata = pickle.load(f)
-        
-    if not metadata:
-        print("No metadata found. Run indexing first.")
-        return
+    import random, re
+    from langchain_core.messages import SystemMessage, HumanMessage
 
-    # Filter out very short chunks
-    valid_chunks = [m for m in metadata if len(m["text"]) > 200]
-    
-    if len(valid_chunks) < num_samples:
-        print(f"Warning: Only {len(valid_chunks)} valid chunks found.")
-        num_samples = len(valid_chunks)
+    meta = pickle.loads((INDEX_DIR / "metadata.pkl").read_bytes())
+    pool = [m for m in meta if len(m["text"]) > 300 and "<unk>" not in m["text"]]
+    chunks = random.sample(pool, min(len(pool), n))
+    print(f"  {len(chunks)} chunks sampled -> generating {n} QA pairs ...")
 
-    selected_chunks = random.sample(valid_chunks, num_samples)
+    llm, _ = _llm()
+    system = SystemMessage(content=(
+        "You are a research QA generator. Given a passage from a scientific paper, "
+        "produce one specific, answerable question and a concise reference answer. "
+        "Respond with ONLY a JSON object — no extra text, no markdown fences:\n"
+        '{"question": "...", "reference_answer": "..."}'
+    ))
+
     dataset = []
-
-    for m in tqdm(selected_chunks, desc="Generating QA pairs"):
-        text = m["text"]
-        prompt = textwrap.dedent(f"""\
-            Given the following text excerpt, generate exactly ONE specific question that can be answered solely based on this text.
-            Do not ask generic questions like "What is this text about?". Ask a specific technical or factual question.
-            Output ONLY the question, without any other text.
-            
-            TEXT:
-            {text}
-            
-            QUESTION:
-        """)
-        
-        question = _query_ollama(prompt, model=OLLAMA_MODEL, max_tokens=1000)
-        
-        if question:
+    for i, m in enumerate(chunks):
+        try:
+            resp = llm.invoke([system, HumanMessage(content=m["text"][:2000])])
+            raw = resp.content if hasattr(resp, "content") else str(resp)
+            # Robustly extract the first {...} block regardless of surrounding text
+            match = re.search(r"\{[^{}]*\"question\"[^{}]*\"reference_answer\"[^{}]*\}", raw, re.S)
+            if not match:
+                match = re.search(r"\{.*?\}", raw, re.S)
+            qa = json.loads(match.group()) if match else {}
+            q  = qa.get("question", "").strip()
+            ra = qa.get("reference_answer", "").strip()
+            if not q:
+                print(f"  [{i+1}/{n}] skipped — no question parsed")
+                continue
             dataset.append({
-                "question": question,
-                "ground_truth_chunk_id": m["chunk_id"],
-                "ground_truth_text": text,
-                "source_file": m["source_file"]
+                "question":             q,
+                "reference_answer":     ra,
+                "ground_truth_text":    m["text"],
+                "ground_truth_chunk_id": m.get("chunk_id", ""),
             })
-            
-    with open(save_path, "w", encoding="utf-8") as f:
-        json.dump(dataset, f, indent=4)
-        
-    print(f"Saved {len(dataset)} evaluation pairs to {save_path}")
+            print(f"  [{i+1}/{n}] Q: {q[:90]}")
+        except Exception as e:
+            print(f"  [{i+1}/{n}] skipped — {type(e).__name__}: {str(e)[:80]}")
 
+    if not dataset:
+        raise RuntimeError("Dataset generation produced 0 samples. Check your judge LLM.")
 
-def evaluate_retrieval(dataset: list[dict], engine: RAGEngine, top_k: int = 5):
-    """
-    Evaluates Hit Rate and Mean Reciprocal Rank (MRR) for the retrieval step.
-    """
-    print(f"\n--- Evaluating Retrieval (Top-{top_k}) ---")
-    
-    hits = 0
-    mrr_sum = 0.0
-    
-    # Save original mock
-    original_mock = getattr(engine, "_generate", None)
-    engine._generate = lambda p: ""
+    DATA.write_text(json.dumps(dataset, indent=2, ensure_ascii=False))
+    print(f"  [OK] Saved {len(dataset)} QA pairs -> {DATA.name}")
+    return dataset
 
-    for item in tqdm(dataset, desc="Evaluating Retrieval"):
-        question = item["question"]
-        gt_chunk_id = item["ground_truth_chunk_id"]
-        
-        # Run retrieval (using hybrid search)
-        result = engine.query(question, top_k=top_k, top_n=top_k, verbose=False, rewrite_query=False)
-        retrieved_ids = [c.chunk_id for c in result.chunks]
-        
-        # Calculate Hit Rate and MRR
-        if gt_chunk_id in retrieved_ids:
-            hits += 1
-            rank = retrieved_ids.index(gt_chunk_id) + 1
-            mrr_sum += 1.0 / rank
+# ── Step 2: Retrieval ──────────────────────────────────────────────────────────
+
+def eval_retrieval(dataset, engine, k=5):
+    hits, mrr = 0, 0.0
+    for item in dataset:
+        if not item.get("ground_truth_chunk_id"): continue
+        ids = [c.chunk_id for c in engine.query(item["question"], top_k=k, top_n=k, verbose=False, rewrite_query=False).chunks]
+        if item["ground_truth_chunk_id"] in ids:
+            rank = ids.index(item["ground_truth_chunk_id"]) + 1
+            hits += 1; mrr += 1 / rank
             item["retrieval_rank"] = rank
-        else:
-            item["retrieval_rank"] = None
-            
-    if not dataset:
-        print("Dataset is empty. Skipping retrieval evaluation.")
-        if original_mock: engine._generate = original_mock
-        return 0.0, 0.0
-        
-    hit_rate = hits / len(dataset)
-    mrr = mrr_sum / len(dataset)
-    
-    if original_mock: engine._generate = original_mock
-    print(f"Retrieval Hit Rate @ {top_k}: {hit_rate:.2%}")
-    print(f"Retrieval MRR @ {top_k}:      {mrr:.4f}")
-    return hit_rate, mrr
+        else: item["retrieval_rank"] = None
+    n = len(dataset) or 1
+    return {"hit_rate": round(hits/n, 4), "mrr": round(mrr/n, 4)}
 
+# ── Step 3: RAGAS ──────────────────────────────────────────────────────────────
 
-def evaluate_generation(dataset: list[dict], engine: RAGEngine, judge_model: str = OLLAMA_MODEL):
-    """
-    Evaluates Faithfulness and Relevance using the LLM as a judge.
-    """
-    print(f"\n--- Evaluating Generation (Judge Model: {judge_model}) ---")
-    
-    faithfulness_scores = []
-    relevance_scores = []
-    
-    for item in tqdm(dataset, desc="Evaluating Generation"):
-        question = item["question"]
-        gt_text = item["ground_truth_text"]
-        
-        # 1. Generate Answer using RAG
-        # Force a fresh history for each eval
+def eval_ragas(dataset, engine):
+    from ragas import evaluate
+    from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
+    from ragas.metrics import Faithfulness, AnswerRelevancy, ContextPrecision, ContextRecall, AnswerCorrectness
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.embeddings import LangchainEmbeddingsWrapper
+
+    llm_raw, _ = _llm()
+    llm, emb = LangchainLLMWrapper(llm_raw), LangchainEmbeddingsWrapper(_emb())
+
+    samples = []
+    for item in dataset:
         engine.clear_history()
-        result = engine.query(question, verbose=False, rewrite_query=False)
-        answer = result.answer
-        context = "\n".join([c.text for c in result.chunks])
-        
-        item["generated_answer"] = answer
-        
-        # 2. Score Faithfulness (1-5): Is the answer hallucinated or derived from context?
-        faith_prompt = textwrap.dedent(f"""\
-            You are an impartial judge. Your task is to evaluate the faithfulness of an AI-generated answer.
-            Compare the generated answer against the provided context.
-            Score from 1 to 5, where:
-            1: The answer contradicts the context or includes major hallucinations.
-            3: The answer is partially faithful but includes some unverified information.
-            5: The answer is completely faithful to the provided context and contains no outside information.
-            
-            Output ONLY a single integer between 1 and 5.
-            
-            CONTEXT:
-            {context}
-            
-            ANSWER:
-            {answer}
-            
-            FAITHFULNESS SCORE:
-        """)
-        
-        f_score_str = _query_ollama(faith_prompt, model=judge_model, max_tokens=500)
-        try:
-            # Extract just the first digit
-            f_score = int(''.join(filter(str.isdigit, f_score_str))[0])
-            faithfulness_scores.append(f_score)
-            item["faithfulness_score"] = f_score
-        except:
-            item["faithfulness_score"] = None
-            
-        # 3. Score Relevance (1-5): Does the answer address the question?
-        rel_prompt = textwrap.dedent(f"""\
-            You are an impartial judge. Your task is to evaluate the relevance of an AI-generated answer to a user's question.
-            Score from 1 to 5, where:
-            1: The answer is completely irrelevant to the question.
-            3: The answer addresses the topic but misses the specific question asked.
-            5: The answer directly and clearly addresses the user's question without unnecessary tangents.
-            
-            Output ONLY a single integer between 1 and 5.
-            
-            QUESTION:
-            {question}
-            
-            ANSWER:
-            {answer}
-            
-            RELEVANCE SCORE:
-        """)
-        
-        r_score_str = _query_ollama(rel_prompt, model=judge_model, max_tokens=500)
-        try:
-            r_score = int(''.join(filter(str.isdigit, r_score_str))[0])
-            relevance_scores.append(r_score)
-            item["relevance_score"] = r_score
-        except:
-            item["relevance_score"] = None
-            
-    if not dataset:
-        print("Dataset is empty. Skipping generation evaluation.")
-        return 0.0, 0.0
+        r = engine.query(item["question"], verbose=False, rewrite_query=False)
+        item["generated_answer"] = r.answer
+        samples.append(SingleTurnSample(
+            user_input=item["question"], response=r.answer,
+            retrieved_contexts=[c.text for c in r.chunks] or [""],
+            reference=item.get("reference_answer") or item.get("ground_truth_text", ""),
+        ))
 
-    avg_faith = sum(faithfulness_scores) / len(faithfulness_scores) if faithfulness_scores else 0
-    avg_rel = sum(relevance_scores) / len(relevance_scores) if relevance_scores else 0
-    
-    print(f"Average Faithfulness Score (1-5): {avg_faith:.2f}")
-    print(f"Average Relevance Score (1-5):    {avg_rel:.2f}")
-    
-    return avg_faith, avg_rel
+    results = evaluate(
+        dataset=EvaluationDataset(samples=samples),
+        metrics=[Faithfulness(llm=llm), AnswerRelevancy(llm=llm, embeddings=emb),
+                 ContextPrecision(llm=llm), ContextRecall(llm=llm), AnswerCorrectness(llm=llm, embeddings=emb)],
+    )
+    return {k: round(float(v), 4) for k, v in results.to_pandas().mean(numeric_only=True).items()}
 
+# ── Main ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Evaluate RAG Pipeline")
-    parser.add_argument("--generate", action="store_true", help="Generate new synthetic dataset")
-    parser.add_argument("--samples", type=int, default=5, help="Number of samples to generate")
-    parser.add_argument("--judge-model", type=str, default=OLLAMA_MODEL, help="Ollama model to use as the judge")
-    args = parser.parse_args()
-    
-    if args.generate or not EVAL_DATASET_PATH.exists():
-        generate_synthetic_dataset(num_samples=args.samples)
-        
-    with open(EVAL_DATASET_PATH, "r", encoding="utf-8") as f:
-        dataset = json.load(f)
-        
-    print("Loading RAG Engine...")
-    # Suppress normal output for eval
-    import sys
-    original_stdout = sys.stdout
-    with open(os.devnull, 'w') as f:
-        sys.stdout = f
-        engine = RAGEngine()
-        # Mock print for generation to prevent streaming output during eval
-        engine._generate = lambda prompt: _query_ollama(prompt, model=OLLAMA_MODEL, max_tokens=1000)
-    sys.stdout = original_stdout
-    
-    evaluate_retrieval(dataset, engine, top_k=5)
-    evaluate_generation(dataset, engine, judge_model=args.judge_model)
-    
-    # Save results
-    results_path = Path("evaluation_results.json")
-    with open(results_path, "w", encoding="utf-8") as f:
-        json.dump(dataset, f, indent=4)
-    print(f"\nDetailed evaluation results saved to {results_path}")
+    p = argparse.ArgumentParser(description="RAG Eval via RAGAS — run with no args")
+    p.add_argument("--force-regen", action="store_true")
+    p.add_argument("--samples",     type=int, default=20)
+    p.add_argument("--top-k",       type=int, default=5)
+    args = p.parse_args()
+
+    _, judge = _llm()
+    print(f"\nRAG EVALUATION  {datetime.now():%Y-%m-%d %H:%M}  judge={judge}")
+
+    dataset = generate_dataset(args.samples) if args.force_regen or _stale() else json.loads(DATA.read_text())
+    print(f"Dataset: {len(dataset)} samples")
+
+    with contextlib.redirect_stdout(io.StringIO()): engine = RAGEngine()
+
+    r_scores = eval_retrieval(dataset, engine, k=args.top_k)
+    g_scores = eval_ragas(dataset, engine)
+
+    print("\n-- Retrieval ---------------------------")
+    for k, v in r_scores.items(): print(f"  {k:<22} {v:.4f}  {'#'*int(v*20)}")
+    print("\n-- Generation (RAGAS) ------------------")
+    for k, v in g_scores.items(): print(f"  {k:<22} {v:.4f}  {'#'*int(v*20)}")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    result = {"meta": {"timestamp": ts, "judge": judge, "samples": len(dataset), "top_k": args.top_k},
+              "summary": {"retrieval": r_scores, "generation": g_scores}, "per_sample": dataset}
+    OUT.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    (BASE / f"evaluation_results_{ts}.json").write_text(json.dumps(result, indent=2))
+    print(f"\n[OK] Saved -> {OUT.name}")

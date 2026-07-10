@@ -145,21 +145,28 @@ class RAGEngine:
         self._bm25 = BM25Index(self._meta)
         print(f"[2b]  BM25 index         ({len(self._meta):,} docs)  {time.time()-t0:.1f}s")
 
-        # ── Embedder on CPU ──────────────────────────────────────
+        # ── Embedder (auto device: CUDA if available, else CPU) ──
+        import torch
+        _cuda_ok = torch.cuda.is_available()
+        _embed_device  = EMBED_DEVICE  if (_cuda_ok or EMBED_DEVICE  == "cpu") else "cpu"
+        _rerank_device = RERANK_DEVICE if (_cuda_ok or RERANK_DEVICE == "cpu") else "cpu"
+        if not _cuda_ok:
+            print("  [INFO] No CUDA detected — running embedder & reranker on CPU")
         t0 = time.time()
-        self.embedder = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE)
-        print(f"[3/5] Embedder          ({EMBED_MODEL})  {time.time()-t0:.1f}s")
+        self.embedder = SentenceTransformer(EMBED_MODEL, device=_embed_device)
+        print(f"[3/5] Embedder          ({EMBED_MODEL} on {_embed_device})  {time.time()-t0:.1f}s")
 
-        # ── Reranker on CPU ──────────────────────────────────────
+        # ── Reranker (auto device) ────────────────────────────────
         self.reranker = None
         if RERANK_MODEL:
             t0 = time.time()
-            self.reranker = CrossEncoder(RERANK_MODEL, device=RERANK_DEVICE, max_length=512)
-            print(f"[3b]  Reranker           ({RERANK_MODEL})  {time.time()-t0:.1f}s")
+            self.reranker = CrossEncoder(RERANK_MODEL, device=_rerank_device, max_length=512)
+            print(f"[3b]  Reranker           ({RERANK_MODEL} on {_rerank_device})  {time.time()-t0:.1f}s")
 
-        # ── Ollama health-check ──────────────────────────────────────────
+        # ── Ollama health-check (non-fatal for evaluation mode) ──
         t0 = time.time()
         print(f"[4/5] Connecting to Ollama ({OLLAMA_URL}) model={OLLAMA_MODEL} ...")
+        self._ollama_available = False
         try:
             resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
             resp.raise_for_status()
@@ -169,11 +176,11 @@ class RAGEngine:
                 print(f"  Run:  ollama pull {OLLAMA_MODEL}")
                 print(f"  Available models: {available}")
             else:
+                self._ollama_available = True
                 print(f"      OK — model ready  {time.time()-t0:.1f}s")
         except requests.exceptions.ConnectionError:
-            print(f"\n  ERROR: Cannot reach Ollama at {OLLAMA_URL}", file=sys.stderr)
-            print(f"  Make sure Ollama is running:  ollama serve", file=sys.stderr)
-            sys.exit(1)
+            print(f"  WARNING: Cannot reach Ollama at {OLLAMA_URL} — answer generation disabled.", file=sys.stderr)
+            print(f"  Retrieval pipeline still available. Start Ollama to enable answers.", file=sys.stderr)
 
         # ── Conversation memory ──────────────────────────────────
         self._history: list[dict] = []   # {"question": ..., "answer": ...}

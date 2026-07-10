@@ -1,12 +1,20 @@
-# RAGAS Evaluation Suite — extra dependencies
+# RAG Evaluation Dependencies — RAGAS Framework
 # Install with: pip install -r requirements_eval.txt
 
-# RAGAS evaluation framework
+# ── RAGAS core ─────────────────────────────────────────────────────────────────
 ragas>=0.2.0
 
-# LangChain adapters (RAGAS judge LLM + embeddings)
-langchain-ollama>=0.1.0
-langchain-huggingface>=0.0.3
+# ── Judge LLM — OpenAI (best quality, recommended) ────────────────────────────
+openai>=1.30.0
+langchain-openai>=0.1.0
 
-# Required by langchain-huggingface
-sentence-transformers>=3.0.0    # already in requirements.txt, listed for clarity
+# ── Judge LLM — Ollama fallback (local, no API key) ───────────────────────────
+langchain-ollama>=0.1.0
+
+# ── Embeddings — BGE via HuggingFace (your existing model) ────────────────────
+langchain-huggingface>=0.0.3
+sentence-transformers>=3.0.0   # already in requirements.txt
+
+# ── RAGAS internals ────────────────────────────────────────────────────────────
+datasets>=2.14.0
+pandas>=2.0.0
