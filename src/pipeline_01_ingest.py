@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
+import torch
 import fitz
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
@@ -14,19 +15,28 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
 
-from config import PDF_DIR, PARSED_DIR, EMBED_MODEL, EMBED_DEVICE
+from config import PDF_DIR, PARSED_DIR
 import nltk
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
+# Auto-detect device — works on both CUDA and CPU-only builds
+_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Device: {_DEVICE}")
+
 # ── config ─────────────────────────────────────────────────────────────────────
 TEMP_DIR   = Path("temp_chunks")
 PAGE_CHUNK = 20
 
-MAX_CHARS     = 1200
-MIN_CHARS     = 80
-OVERLAP_LINES = 1   # only applied when a section must be split across windows
+MAX_CHARS          = 1200   # hard character cap per chunk
+MIN_CHARS          = 80     # discard chunks shorter than this
+MIN_SEMANTIC_CHARS = 200    # min size for semantically-split fragments (avoids orphan sentences)
+SENTENCE_OVERLAP   = 0      # no sentence carry-over — avoids repeated sentences between chunks
+SPLIT_SIM_CEILING  = 0.75   # never force-split when sentence similarity exceeds this
+
+# Lightweight model for in-chunker sentence similarity (keeps ingest fast; BGE-Large is for embedding)
+CHUNK_EMBED_MODEL = "all-MiniLM-L6-v2"
 
 # Sections that are noise for a research RAG pipeline — skip entirely
 _SKIP_HEADINGS = re.compile(
@@ -41,8 +51,9 @@ PARSED_DIR.mkdir(exist_ok=True, parents=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 # ── Docling pipeline ───────────────────────────────────────────────────────────
+_docling_device = AcceleratorDevice.CUDA if _DEVICE == "cuda" else AcceleratorDevice.CPU
 opts = PdfPipelineOptions(
-    accelerator_options=AcceleratorOptions(device=AcceleratorDevice.CUDA),
+    accelerator_options=AcceleratorOptions(device=_docling_device),
     layout_batch_size=1,
     table_batch_size=4,
     ocr_batch_size=1,
@@ -132,7 +143,9 @@ def _split_markdown(md: str) -> list[dict]:
             while h_stack and h_stack[-1][0] >= level:
                 h_stack.pop()
             h_stack.append((level, title))
-            buf.append(line)
+            # Do NOT add the heading line to buf — it is already captured in
+            # h_stack and will be prepended cleanly as heading_prefix in
+            # chunk_markdown. Adding it here causes heading duplication.
             continue
 
         if _is_junk(line):
@@ -144,10 +157,35 @@ def _split_markdown(md: str) -> list[dict]:
     return blocks
 
 
+def _split_table(table_text: str) -> list[str]:
+    """Split oversized markdown tables, repeating the header row in every chunk."""
+    rows = [r for r in table_text.splitlines() if r.strip()]
+    if len(rows) < 3:                   # need header + separator + ≥1 data row
+        return [table_text]
+    header_rows = rows[:2]              # | col | … | and | --- | … |
+    results, current = [], list(header_rows)
+    for row in rows[2:]:
+        current.append(row)
+        if len("\n".join(current)) > MAX_CHARS:
+            results.append("\n".join(current))
+            current = list(header_rows)  # reset with header
+    if len(current) > len(header_rows):
+        results.append("\n".join(current))
+    return results or [table_text]
+
+
 def _semantic_chunker(block: dict) -> list[dict]:
     """
-    Splits a section block into chunks by isolating tables/code 
-    and using cosine similarity between sentences for natural text.
+    Splits a section block into chunks:
+      - Code blocks  → atomic (never split)
+      - Tables       → split at row boundaries, header repeated in each chunk
+      - Plain text   → semantic splitting with overlap + fragment merging
+    Fixes applied:
+      [1] Lightweight embed model (all-MiniLM) instead of BGE-Large
+      [2] Adaptive similarity threshold capped at SPLIT_SIM_CEILING (no over-splitting)
+      [3] SENTENCE_OVERLAP sentences carried into next chunk
+      [4] Small fragment merging (avoids orphan sentences)
+      [5] Long tables split with header repetition
     """
     text   = block["text"]
     hstack = block["heading_stack"]
@@ -155,126 +193,126 @@ def _semantic_chunker(block: dict) -> list[dict]:
     has_table = bool(_TABLE_ROW.search(text))
     has_code  = "```" in text
 
-    # Fast path if it fits entirely in one chunk
+    # Fast path: fits in one chunk as-is
     if len(text) <= MAX_CHARS and not has_table and not has_code:
         return [block] if len(text) >= MIN_CHARS else []
 
-    # 1. Isolate tables and code
+    # ── 1. Separate tables and code from plain text ───────────────────────────
     lines = text.splitlines()
-    sub_blocks = []
-    current_type = None
-    current_lines = []
-    in_code = False
-    
+    sub_blocks, current_type, current_lines, in_code = [], None, [], False
+
     for line in lines:
         if _CODE_FENCE.match(line):
             if not in_code:
                 if current_lines:
                     sub_blocks.append({"type": current_type or "text", "lines": current_lines})
-                current_lines = [line]
-                current_type = "code"
-                in_code = True
+                current_lines, current_type, in_code = [line], "code", True
             else:
                 current_lines.append(line)
                 sub_blocks.append({"type": "code", "lines": current_lines})
-                current_lines = []
-                current_type = None
-                in_code = False
+                current_lines, current_type, in_code = [], None, False
             continue
-            
         if in_code:
             current_lines.append(line)
             continue
-            
         if bool(_TABLE_ROW.search(line)):
             if current_type != "table":
                 if current_lines:
                     sub_blocks.append({"type": current_type or "text", "lines": current_lines})
-                current_lines = []
-                current_type = "table"
+                current_lines, current_type = [], "table"
             current_lines.append(line)
         else:
             if current_type == "table":
                 sub_blocks.append({"type": "table", "lines": current_lines})
-                current_lines = []
-                current_type = "text"
+                current_lines, current_type = [], "text"
             else:
                 current_type = "text"
             current_lines.append(line)
-            
     if current_lines:
-         sub_blocks.append({"type": current_type or "text", "lines": current_lines})
+        sub_blocks.append({"type": current_type or "text", "lines": current_lines})
 
-    # 2. Process sub-blocks semantically
+    # ── 2. Process each sub-block ─────────────────────────────────────────────
+    global _chunker_embedder
     windows = []
+
     for sb in sub_blocks:
         sb_text = "\n".join(sb["lines"]).strip()
         if len(sb_text) < MIN_CHARS:
             continue
-            
-        if sb["type"] in ["table", "code"]:
-            # Tables and code blocks are atomic
-            windows.append({
-                "heading_stack": hstack, 
-                "text": sb_text, 
-                "has_table": (sb["type"] == "table"),
-                "has_code": (sb["type"] == "code")
-            })
+
+        # Code → always atomic
+        if sb["type"] == "code":
+            windows.append({"heading_stack": hstack, "text": sb_text, "has_code": True})
             continue
 
-        # For text, apply semantic chunking
+        # Table → split with header repetition if too large
+        if sb["type"] == "table":
+            for tbl_chunk in _split_table(sb_text):
+                if len(tbl_chunk) >= MIN_CHARS:
+                    windows.append({"heading_stack": hstack, "text": tbl_chunk, "has_table": True})
+            continue
+
+        # Plain text → semantic splitting
         try:
             sentences = nltk.sent_tokenize(sb_text)
-        except:
-            nltk.download('punkt', quiet=True)
-            nltk.download('punkt_tab', quiet=True)
+        except Exception:
+            nltk.download("punkt",     quiet=True)
+            nltk.download("punkt_tab", quiet=True)
             sentences = nltk.sent_tokenize(sb_text)
-            
+
         if not sentences:
             continue
-            
         if len(sentences) == 1 or len(sb_text) <= 500:
             windows.append({"heading_stack": hstack, "text": sb_text})
             continue
-            
-        # Semantic splitting
-        global _embedder
-        if '_embedder' not in globals():
-            _embedder = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE)
-            
-        embeddings = _embedder.encode(sentences)
-        
-        similarities = []
-        for i in range(len(sentences) - 1):
-            sim = cosine_similarity([embeddings[i]], [embeddings[i+1]])[0][0]
-            similarities.append(sim)
-            
+
+        # Fix [1]: lazy-load lightweight model on auto-detected device
+        if "_chunker_embedder" not in globals():
+            _chunker_embedder = SentenceTransformer(CHUNK_EMBED_MODEL, device=_DEVICE)
+
+        embs = _chunker_embedder.encode(sentences, show_progress_bar=False)
+        similarities = [
+            float(cosine_similarity([embs[i]], [embs[i + 1]])[0][0])
+            for i in range(len(sentences) - 1)
+        ]
+
         if not similarities:
             windows.append({"heading_stack": hstack, "text": sb_text})
             continue
-            
-        threshold = np.percentile(similarities, 30) # Bottom 30% are split points
-        
-        chunks = []
-        current_chunk = [sentences[0]]
-        current_len = len(sentences[0])
-        
-        for i, (sent, sim) in enumerate(zip(sentences[1:], similarities)):
-            if (sim < threshold and current_len > 300) or (current_len + len(sent) > MAX_CHARS):
-                chunks.append(" ".join(current_chunk))
-                current_chunk = [sent]
-                current_len = len(sent)
+
+        # Fix [2]: cap threshold — never over-split dense coherent text
+        threshold = min(float(np.percentile(similarities, 30)), SPLIT_SIM_CEILING)
+
+        raw_chunks, current_chunk, current_len = [], [sentences[0]], len(sentences[0])
+        for sent, sim in zip(sentences[1:], similarities):
+            should_split = (
+                (sim < threshold and current_len > 300)
+                or (current_len + len(sent) > MAX_CHARS)
+            )
+            if should_split:
+                raw_chunks.append(" ".join(current_chunk))
+                # Fix [3]: seed next chunk with last SENTENCE_OVERLAP sentences
+                overlap        = current_chunk[-SENTENCE_OVERLAP:] if SENTENCE_OVERLAP else []
+                current_chunk  = overlap + [sent]
+                current_len    = sum(len(s) + 1 for s in current_chunk)
             else:
                 current_chunk.append(sent)
                 current_len += len(sent) + 1
-                
         if current_chunk:
-            chunks.append(" ".join(current_chunk))
-            
-        for c in chunks:
+            raw_chunks.append(" ".join(current_chunk))
+
+        # Fix [4]: merge undersized fragments into the previous chunk
+        merged: list[str] = []
+        for c in raw_chunks:
+            if merged and len(c) < MIN_SEMANTIC_CHARS:
+                merged[-1] += " " + c
+            else:
+                merged.append(c)
+
+        for c in merged:
             if len(c) >= MIN_CHARS:
                 windows.append({"heading_stack": hstack, "text": c})
-                
+
     return windows
 
 
@@ -296,15 +334,21 @@ def chunk_markdown(md: str, doc_id: str, source_file: str) -> list[dict]:
             # prefer flags pre-set by _semantic_chunker (for tables/code),
             # fall back to _detect on the windowed text
             d = _detect(text)
+            # Fix [6]: prepend section heading to chunk text for retrieval context
+            heading_prefix = (
+                " > ".join(win["heading_stack"]) + "\n\n"
+                if win["heading_stack"] else ""
+            )
+            full_text = heading_prefix + text
             chunks.append({
-                "chunk_id":    _chunk_id(doc_id, idx, text),
+                "chunk_id":    _chunk_id(doc_id, idx, full_text),
                 "doc_id":      doc_id,
                 "source_file": source_file,
                 "chunk_index": idx,
                 "section_path": win["heading_stack"],
                 "heading":     win["heading_stack"][-1] if win["heading_stack"] else None,
-                "text":        text,
-                "char_count":  len(text),
+                "text":        full_text,
+                "char_count":  len(full_text),
                 "has_table":   win.get("has_table", d["has_table"]),
                 "has_formula": win.get("has_formula", d["has_formula"]),
                 "has_code":    win.get("has_code",  d["has_code"]),

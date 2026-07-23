@@ -10,7 +10,7 @@ docling>=2.0.0
 PyMuPDF>=1.24.0
 
 # Search & Retrieval
-faiss-cpu>=1.8.0
+chromadb>=0.5.0
 rank-bm25>=0.2.2
 
 # Utilities
@@ -20,3 +20,15 @@ gradio>=4.0.0
 requests
 nltk
 scikit-learn
+
+# ── Fine-Tuning (Unsloth + LoRA) ─────────────────────────────────────────────
+# On Linux / WSL2 / Colab (recommended):
+unsloth[colab-new]>=2024.9
+# On native Windows (fallback — no CUDA kernel speedup):
+# unsloth[windows]>=2024.9
+trl>=0.9.0
+peft>=0.11.0
+datasets>=2.19.0
+groq>=0.9.0          # Groq API client (used for high-quality dataset generation)
+
+

@@ -1,32 +1,45 @@
 """
-RAG Pipeline — Part 1: Index Builder
+RAG Pipeline - Part 2: ChromaDB Index Builder
   - Reads all .jsonl files from PARSED DATA directory
-  - Encodes chunks with BGE-M3 (best for research text)
-  - Builds a FAISS IVFFlat index with cosine similarity
-  - Saves index + metadata to disk
+  - Encodes chunks with BGE-Large (best for research text)
+  - Upserts embeddings + metadata into a ChromaDB persistent collection
+  - Idempotent: re-running skips already-indexed chunk IDs
 """
 
 import json
-import pickle
 import time
+import os
 import numpy as np
 from pathlib import Path
-import os
-import faiss
+
+import torch
+import chromadb
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from config import PARSED_DIR, INDEX_DIR, EMBED_MODEL, EMBED_DIM, EMBED_BATCH, NPROBE, EMBED_DEVICE
+from config import (
+    PARSED_DIR, CHROMA_DIR, CHROMA_COLLECTION,
+    EMBED_MODEL, EMBED_DIM, EMBED_BATCH, CHROMA_BATCH,
+)
 
-# FAISS: IVFFlat — fast approximate search
-# nlist = number of Voronoi cells; sqrt(N) is a good heuristic
-# We'll set it after counting total chunks
+# Auto-detect device
+_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Device: {_DEVICE}")
 
-INDEX_DIR.mkdir(exist_ok=True, parents=True)
+# -- setup ChromaDB -----------------------------------------------------------
+CHROMA_DIR.mkdir(exist_ok=True, parents=True)
 
-# ── load all chunks ────────────────────────────────────────────────────────────
-print("Loading chunks from JSONL files …")
-all_chunks: list[dict] = []
+print(f"Opening ChromaDB at: {CHROMA_DIR}")
+client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+collection = client.get_or_create_collection(
+    name=CHROMA_COLLECTION,
+    metadata={"hnsw:space": "cosine"},   # cosine similarity via HNSW
+)
+print(f"  Collection '{CHROMA_COLLECTION}'  |  vectors already stored: {collection.count():,}\n")
+
+# -- load all chunks ----------------------------------------------------------
+print("Loading chunks from JSONL files ...")
+all_chunks = []
 
 for jsonl_path in sorted(PARSED_DIR.glob("*.jsonl")):
     with open(jsonl_path, encoding="utf-8") as f:
@@ -35,24 +48,36 @@ for jsonl_path in sorted(PARSED_DIR.glob("*.jsonl")):
             if line:
                 all_chunks.append(json.loads(line))
 
-print(f"  Loaded {len(all_chunks):,} chunks from {len(list(PARSED_DIR.glob('*.jsonl')))} files\n")
+n_files = len(list(PARSED_DIR.glob("*.jsonl")))
+print(f"  Loaded {len(all_chunks):,} chunks from {n_files} files\n")
 
 if not all_chunks:
-    raise RuntimeError("No chunks found — run the PDF chunker first.")
+    raise RuntimeError("No chunks found. Run pipeline_01_ingest.py first.")
 
-# ── embed ──────────────────────────────────────────────────────────────────────
-print(f"Loading embedding model: {EMBED_MODEL} …")
-embedder = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE)
+# -- check which chunks are already indexed -----------------------------------
+print("Checking for already-indexed chunks ...")
+existing = collection.get(include=[])
+existing_ids = set(existing["ids"])
+n_new = len(all_chunks) - len(existing_ids)
+print(f"  Already in DB: {len(existing_ids):,}  |  New to index: {n_new:,}\n")
 
-# BGE models work best with a query prefix; for indexing use passage prefix
-texts = [
-    f"passage: {c['text']}" for c in all_chunks
-]
+new_chunks = [c for c in all_chunks if c["chunk_id"] not in existing_ids]
 
-print(f"Embedding {len(texts):,} passages (batch={EMBED_BATCH}) …")
+if not new_chunks:
+    print("All chunks already indexed. Nothing to do.")
+    exit(0)
+
+# -- embed --------------------------------------------------------------------
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+print(f"Loading embedding model: {EMBED_MODEL} ...")
+embedder = SentenceTransformer(EMBED_MODEL, device=_DEVICE)
+
+texts = ["passage: " + c["text"] for c in new_chunks]
+
+print(f"Embedding {len(texts):,} new passages (batch={EMBED_BATCH}) ...")
 t0 = time.time()
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 embeddings = embedder.encode(
     texts,
     batch_size=EMBED_BATCH,
@@ -63,59 +88,40 @@ embeddings = embedder.encode(
 
 print(f"  Done in {time.time()-t0:.1f}s  |  shape: {embeddings.shape}\n")
 
-# ── build FAISS index ──────────────────────────────────────────────────────────
-N      = len(all_chunks)
-nlist  = max(64, min(4096, int(N ** 0.5)))   # sqrt heuristic, clamped
+# -- upsert into ChromaDB -----------------------------------------------------
+print(f"Upserting {len(new_chunks):,} chunks into ChromaDB (batch={CHROMA_BATCH}) ...")
+t0 = time.time()
 
-print(f"Building FAISS IVFFlat index  (N={N:,}, nlist={nlist}, dim={EMBED_DIM}) …")
+for batch_start in tqdm(range(0, len(new_chunks), CHROMA_BATCH)):
+    batch_end        = batch_start + CHROMA_BATCH
+    batch_chunks     = new_chunks[batch_start:batch_end]
+    batch_embeddings = embeddings[batch_start:batch_end]
 
-# Inner product on L2-normed vectors == cosine similarity
-quantizer = faiss.IndexFlatIP(EMBED_DIM)
-index     = faiss.IndexIVFFlat(quantizer, EMBED_DIM, nlist, faiss.METRIC_INNER_PRODUCT)
+    ids       = [c["chunk_id"] for c in batch_chunks]
+    documents = [c["text"]     for c in batch_chunks]
+    metadatas = []
+    for c in batch_chunks:
+        section_list = c.get("section_path") or []
+        metadatas.append({
+            "doc_id":        c["doc_id"],
+            "source_file":   c["source_file"],
+            "chunk_index":   int(c["chunk_index"]),
+            "heading":       c.get("heading") or "",
+            "section_path":  " > ".join(section_list),
+            "has_table":     bool(c.get("has_table",   False)),
+            "has_formula":   bool(c.get("has_formula", False)),
+            "has_code":      bool(c.get("has_code",    False)),
+            "prev_chunk_id": c.get("prev_chunk_id") or "",
+            "next_chunk_id": c.get("next_chunk_id") or "",
+        })
 
-# IVF must be trained before adding vectors
-print("  Training index …")
-index.train(embeddings)
-print("  Adding vectors …")
-index.add(embeddings)
-index.nprobe = NPROBE
+    collection.upsert(
+        ids=ids,
+        embeddings=batch_embeddings.tolist(),
+        documents=documents,
+        metadatas=metadatas,
+    )
 
-print(f"  Index total vectors: {index.ntotal:,}\n")
-
-# ── save to disk ───────────────────────────────────────────────────────────────
-index_path    = INDEX_DIR / "faiss.index"
-metadata_path = INDEX_DIR / "metadata.pkl"
-
-faiss.write_index(index, str(index_path))
-print(f"FAISS index saved → {index_path}")
-
-# Store only what we need for retrieval (no full text duplication of embeddings)
-metadata = [
-    {
-        "chunk_id":     c["chunk_id"],
-        "doc_id":       c["doc_id"],
-        "source_file":  c["source_file"],
-        "chunk_index":  c["chunk_index"],
-        "section_path": c.get("section_path", []),
-        "heading":      c.get("heading"),
-        "text":         c["text"],          # kept for context assembly
-        "has_table":    c.get("has_table", False),
-        "has_formula":  c.get("has_formula", False),
-        "has_code":     c.get("has_code", False),
-        "prev_chunk_id": c.get("prev_chunk_id"),
-        "next_chunk_id": c.get("next_chunk_id"),
-    }
-    for c in all_chunks
-]
-
-with open(metadata_path, "wb") as f:
-    pickle.dump(metadata, f)
-print(f"Metadata saved    → {metadata_path}")
-
-# Also build a chunk_id → index lookup for neighbour expansion
-id_to_idx = {c["chunk_id"]: i for i, c in enumerate(metadata)}
-with open(INDEX_DIR / "id_to_idx.pkl", "wb") as f:
-    pickle.dump(id_to_idx, f)
-print(f"ID→idx map saved  → {INDEX_DIR / 'id_to_idx.pkl'}\n")
-
-print("Index build complete ✓")
+print(f"\n  Done in {time.time()-t0:.1f}s")
+print(f"  Total vectors in collection: {collection.count():,}\n")
+print("ChromaDB index build complete.")

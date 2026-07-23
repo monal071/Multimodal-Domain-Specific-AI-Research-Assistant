@@ -1,15 +1,12 @@
 """
 RAG Pipeline — Query Engine with Hybrid Retrieval
-  - BM25 + FAISS with Reciprocal Rank Fusion
-  - BGE embeddings on CPU, DeepSeek via Ollama (llama.cpp)
-  - Reranker re-enabled
-  - Query rewriting added
-  - Conversation memory added
+  - BM25 + ChromaDB with Reciprocal Rank Fusion
+  - BGE embeddings on CUDA/CPU, DeepSeek via Ollama (llama.cpp)
+  - Reranker, query rewriting (HyDE), conversation memory
 """
 
 import json
 import os
-import pickle
 import string
 import sys
 import textwrap
@@ -20,14 +17,15 @@ from typing import Optional
 
 import requests
 
-import faiss
+import chromadb
 import numpy as np
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
 from config import (
-    INDEX_DIR, EMBED_MODEL, RERANK_MODEL, EMBED_DIM,
-    EMBED_DEVICE, RERANK_DEVICE, FAISS_TOP_K, RERANK_TOP_N, CONTEXT_WINDOW,
+    CHROMA_DIR, CHROMA_COLLECTION,
+    EMBED_MODEL, RERANK_MODEL, EMBED_DIM,
+    EMBED_DEVICE, RERANK_DEVICE, RETRIEVAL_TOP_K, RERANK_TOP_N, CONTEXT_WINDOW,
     MAX_NEW_TOKENS, MAX_HISTORY,
     OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT,
 )
@@ -63,50 +61,62 @@ class BM25Index:
 #  RECIPROCAL RANK FUSION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _meta_to_chunk(m: dict, score: float = 0.0) -> RetrievedChunk:
+def _chroma_result_to_chunk(chunk_id: str, document: str, metadata: dict, score: float = 0.0) -> RetrievedChunk:
+    section_path = [s for s in metadata.get("section_path", "").split(" > ") if s]
     return RetrievedChunk(
-        chunk_id=m["chunk_id"],
-        doc_id=m["doc_id"],
-        source_file=m["source_file"],
-        section_path=m.get("section_path", []),
-        heading=m.get("heading"),
-        text=m["text"],
+        chunk_id=chunk_id,
+        doc_id=metadata["doc_id"],
+        source_file=metadata["source_file"],
+        section_path=section_path,
+        heading=metadata.get("heading") or None,
+        text=document,
         score=score,
-        has_table=m.get("has_table", False),
-        has_formula=m.get("has_formula", False),
+        has_table=bool(metadata.get("has_table", False)),
+        has_formula=bool(metadata.get("has_formula", False)),
     )
 
 
 def reciprocal_rank_fusion(
-    faiss_results: list[RetrievedChunk],
-    bm25_results:  list[tuple[int, float]],
-    metadata:      list[dict],
-    top_n:         int,
-    k:             int = 60,
+    chroma_results: list[RetrievedChunk],
+    bm25_results:   list[tuple[int, float]],
+    bm25_corpus:    list[dict],
+    top_n:          int,
+    k:              int = 60,
 ) -> list[RetrievedChunk]:
     """
-    Merge FAISS + BM25 ranked lists.
+    Merge ChromaDB semantic + BM25 keyword ranked lists.
     RRF score = 1/(rank+k) summed across retrievers.
     Chunks appearing high in both lists win.
     """
     rrf_scores: dict[str, float] = {}
-    chunk_map:  dict[str, dict]  = {}
+    chunk_map:  dict[str, RetrievedChunk] = {}
 
-    # score FAISS results
-    for rank, chunk in enumerate(faiss_results):
+    # score semantic (ChromaDB) results
+    for rank, chunk in enumerate(chroma_results):
         cid = chunk.chunk_id
-        rrf_scores[cid]  = rrf_scores.get(cid, 0.0) + 1.0 / (rank + k)
-        chunk_map[cid]   = chunk
+        rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (rank + k)
+        chunk_map[cid]  = chunk
 
     # score BM25 results
     for rank, (meta_idx, _) in enumerate(bm25_results):
-        m   = metadata[meta_idx]
+        m   = bm25_corpus[meta_idx]
         cid = m["chunk_id"]
         rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (rank + k)
         if cid not in chunk_map:
-            chunk_map[cid] = _meta_to_chunk(m)
+            section_path = [s for s in m.get("section_path", "").split(" > ") if s]
+            chunk_map[cid] = RetrievedChunk(
+                chunk_id=cid,
+                doc_id=m["doc_id"],
+                source_file=m["source_file"],
+                section_path=section_path,
+                heading=m.get("heading") or None,
+                text=m["text"],
+                score=0.0,
+                has_table=bool(m.get("has_table", False)),
+                has_formula=bool(m.get("has_formula", False)),
+            )
 
-    # sort by RRF score, assign as the chunk's score for display
+    # sort by RRF score
     ranked_ids = sorted(rrf_scores, key=lambda c: rrf_scores[c], reverse=True)
     results    = []
     for cid in ranked_ids[:top_n]:
@@ -127,25 +137,45 @@ class RAGEngine:
         print("Loading RAG Engine ...")
         print("=" * 60)
 
-        # ── FAISS ────────────────────────────────────────────────
+        # -- ChromaDB ---------------------------------------------------------
         t0 = time.time()
-        self.index = faiss.read_index(str(INDEX_DIR / "faiss.index"))
-        self.index.nprobe = 32
-        print(f"[1/5] FAISS index       ({self.index.ntotal:,} vectors)  {time.time()-t0:.1f}s")
+        chroma_client   = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        self.collection = chroma_client.get_collection(name=CHROMA_COLLECTION)
+        n_total         = self.collection.count()
+        print(f"[1/5] ChromaDB collection  ({n_total:,} vectors)  {time.time()-t0:.1f}s")
 
-        # ── Metadata ─────────────────────────────────────────────
-        with open(INDEX_DIR / "metadata.pkl", "rb") as f:
-            self._meta: list[dict] = pickle.load(f)
-        with open(INDEX_DIR / "id_to_idx.pkl", "rb") as f:
-            self._id_to_idx: dict[str, int] = pickle.load(f)
-        print(f"[2/5] Metadata          ({len(self._meta):,} chunks)")
-
-        # ── BM25 ─────────────────────────────────────────────────
+        # -- Build BM25 corpus from ChromaDB (load all docs + metadata) -------
         t0 = time.time()
-        self._bm25 = BM25Index(self._meta)
-        print(f"[2b]  BM25 index         ({len(self._meta):,} docs)  {time.time()-t0:.1f}s")
+        all_data = self.collection.get(include=["documents", "metadatas"])
+        self._bm25_corpus: list[dict] = [
+            {
+                "chunk_id":      cid,
+                "text":          doc,
+                "doc_id":        meta["doc_id"],
+                "source_file":   meta["source_file"],
+                "heading":       meta.get("heading") or None,
+                "section_path":  meta.get("section_path", ""),
+                "has_table":     meta.get("has_table",   False),
+                "has_formula":   meta.get("has_formula", False),
+                "has_code":      meta.get("has_code",    False),
+                "prev_chunk_id": meta.get("prev_chunk_id") or None,
+                "next_chunk_id": meta.get("next_chunk_id") or None,
+                "chunk_index":   meta.get("chunk_index", 0),
+            }
+            for cid, doc, meta in zip(
+                all_data["ids"],
+                all_data["documents"],
+                all_data["metadatas"],
+            )
+        ]
+        self._id_to_corpus_idx: dict[str, int] = {
+            c["chunk_id"]: i for i, c in enumerate(self._bm25_corpus)
+        }
+        self._bm25 = BM25Index(self._bm25_corpus)
+        print(f"[2/5] BM25 index           ({len(self._bm25_corpus):,} docs)  {time.time()-t0:.1f}s")
 
-        # ── Embedder (auto device: CUDA if available, else CPU) ──
+
+        # -- Embedder (auto device: CUDA if available, else CPU) -------------
         import torch
         _cuda_ok = torch.cuda.is_available()
         _embed_device  = EMBED_DEVICE  if (_cuda_ok or EMBED_DEVICE  == "cpu") else "cpu"
@@ -240,37 +270,36 @@ class RAGEngine:
 
     def _embed_query(self, query: str) -> np.ndarray:
         vec = self.embedder.encode(
-            f"query: {query}",
+            "query: " + query,
             normalize_embeddings=True,
             convert_to_numpy=True,
         ).astype("float32")
         return vec.reshape(1, -1)
 
-    def _faiss_search(self, query_vec: np.ndarray, top_k: int) -> list[RetrievedChunk]:
-        scores, idxs = self.index.search(query_vec, top_k)
-        results = []
-        for score, idx in zip(scores[0], idxs[0]):
-            if idx == -1:
-                continue
-            m = self._meta[idx]
-            results.append(RetrievedChunk(
-                chunk_id=m["chunk_id"],
-                doc_id=m["doc_id"],
-                source_file=m["source_file"],
-                section_path=m.get("section_path", []),
-                heading=m.get("heading"),
-                text=m["text"],
-                score=float(score),
-                has_table=m.get("has_table", False),
-                has_formula=m.get("has_formula", False),
-            ))
-        return results
+    def _chroma_search(self, query_vec: np.ndarray, top_k: int) -> list[RetrievedChunk]:
+        """Semantic search via ChromaDB HNSW index."""
+        results = self.collection.query(
+            query_embeddings=query_vec.tolist(),
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"],
+        )
+        chunks = []
+        for chunk_id, document, metadata, distance in zip(
+            results["ids"][0],
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+        ):
+            # ChromaDB cosine distance = 1 - cosine_similarity; convert to similarity
+            score = 1.0 - float(distance)
+            chunks.append(_chroma_result_to_chunk(chunk_id, document, metadata, score))
+        return chunks
 
     def _hybrid_search(self, query: str, query_vec: np.ndarray, top_k: int) -> list[RetrievedChunk]:
-        """FAISS semantic + BM25 keyword, fused with RRF."""
-        faiss_results = self._faiss_search(query_vec, top_k)
-        bm25_results  = self._bm25.search(query, top_k)
-        return reciprocal_rank_fusion(faiss_results, bm25_results, self._meta, top_n=top_k)
+        """ChromaDB semantic + BM25 keyword, fused with RRF."""
+        chroma_results = self._chroma_search(query_vec, top_k)
+        bm25_results   = self._bm25.search(query, top_k)
+        return reciprocal_rank_fusion(chroma_results, bm25_results, self._bm25_corpus, top_n=top_k)
 
     def _rerank(self, query: str, chunks: list[RetrievedChunk], top_n: int) -> list[RetrievedChunk]:
         if not self.reranker or not chunks:
@@ -282,23 +311,44 @@ class RAGEngine:
         return sorted(chunks, key=lambda c: c.rerank_score, reverse=True)[:top_n]
 
     def _expand_context(self, chunks: list[RetrievedChunk], window: int) -> list[RetrievedChunk]:
+        """Expand each chunk by fetching its prev/next neighbours from ChromaDB."""
         if window == 0:
             return chunks
-        seen, expanded_idxs = set(), set()
+        seen: set[str]         = set()
+        expanded_ids: list[str] = []
+
         for c in chunks:
-            base_idx = self._id_to_idx.get(c.chunk_id)
+            base_idx = self._id_to_corpus_idx.get(c.chunk_id)
             if base_idx is None:
                 continue
             for offset in range(-window, window + 1):
                 n = base_idx + offset
-                if 0 <= n < len(self._meta) and self._meta[n]["doc_id"] == c.doc_id:
-                    expanded_idxs.add(n)
-        result = []
-        for idx in sorted(expanded_idxs):
-            m = self._meta[idx]
-            if m["chunk_id"] not in seen:
-                seen.add(m["chunk_id"])
-                result.append(_meta_to_chunk(m))
+                if 0 <= n < len(self._bm25_corpus):
+                    neighbour = self._bm25_corpus[n]
+                    if neighbour["doc_id"] == c.doc_id:
+                        nid = neighbour["chunk_id"]
+                        if nid not in seen:
+                            seen.add(nid)
+                            expanded_ids.append(nid)
+
+        if not expanded_ids:
+            return chunks
+
+        # Fetch the actual documents from ChromaDB by ID
+        fetched = self.collection.get(
+            ids=expanded_ids,
+            include=["documents", "metadatas"],
+        )
+        result = [
+            _chroma_result_to_chunk(cid, doc, meta)
+            for cid, doc, meta in zip(
+                fetched["ids"],
+                fetched["documents"],
+                fetched["metadatas"],
+            )
+        ]
+        # Keep original sort order (by chunk_index within doc)
+        result.sort(key=lambda c: (c.doc_id, c.chunk_id))
         return result
 
     # ──────────────────────────────────────────────────────────────
@@ -416,7 +466,7 @@ class RAGEngine:
     def query(
         self,
         question:       str,
-        top_k:          int  = FAISS_TOP_K,
+        top_k:          int  = RETRIEVAL_TOP_K,
         top_n:          int  = RERANK_TOP_N,
         rewrite_query:  bool = True,
         expand_context: bool = False,
@@ -438,7 +488,7 @@ class RAGEngine:
         print(f"        done ({latency['embed']*1000:.0f}ms)", flush=True)
 
         # 3. Hybrid retrieval
-        print("  [3/5] Hybrid search (FAISS + BM25) ...", flush=True)
+        print("  [3/5] Hybrid search (ChromaDB + BM25) ...", flush=True)
         t0 = time.time()
         candidates = self._hybrid_search(search_query, q_vec, top_k)
         latency["retrieval"] = time.time() - t0

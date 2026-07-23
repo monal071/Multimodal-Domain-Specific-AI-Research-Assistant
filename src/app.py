@@ -37,7 +37,7 @@ def chat(message: str, history: list, rewrite: bool):
     Gradio streaming chat handler.
     Yields (history, sources_markdown) pairs as tokens arrive.
     """
-    from config import FAISS_TOP_K, RERANK_TOP_N
+    from config import RETRIEVAL_TOP_K, RERANK_TOP_N
     import time
 
     if not message.strip():
@@ -53,7 +53,7 @@ def chat(message: str, history: list, rewrite: bool):
 
     # ── 2. Retrieve + rerank ──────────────────────────────────────────────────
     q_vec      = engine._embed_query(search_query)
-    candidates = engine._hybrid_search(search_query, q_vec, FAISS_TOP_K)
+    candidates = engine._hybrid_search(search_query, q_vec, RETRIEVAL_TOP_K)
     ranked     = engine._rerank(message, candidates, RERANK_TOP_N)
 
     # ── 3. Build sources markdown ─────────────────────────────────────────────
