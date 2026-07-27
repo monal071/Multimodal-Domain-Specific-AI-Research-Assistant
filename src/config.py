@@ -29,7 +29,7 @@ CONTEXT_WINDOW  = 0
 
 # ── Ollama Settings ──────────────────────────────────────────────────────────
 OLLAMA_URL   = "http://localhost:11434"   # default Ollama address
-OLLAMA_MODEL = "qwen2.5:7b-instruct"      # model tag as shown in `ollama list`
+OLLAMA_MODEL = "qwen3:8b"                 # model tag as shown in `ollama list`
 OLLAMA_TIMEOUT = 300                      # seconds; raise if you use a big model
 
 MAX_NEW_TOKENS = 2048
@@ -38,10 +38,9 @@ MAX_HISTORY    = 4
 # ── Fine-Tuning Settings (Unsloth LoRA) ──────────────────────────────────────
 # Base model — use an unsloth/* variant for 4-bit pre-quantized weights.
 # Options:
-#   "unsloth/Qwen2.5-7B-Instruct"                ← ACTIVE (strong reasoning & fast RAG)
-#   "unsloth/Meta-Llama-3.1-8B-Instruct"         (strong general instruction following)
-#   "unsloth/mistral-7b-instruct-v0.3"           (lightweight)
-FT_MODEL_ID     = "unsloth/Qwen2.5-7B-Instruct"
+#   "unsloth/Qwen3-8B"                           ← ACTIVE
+#   "unsloth/Meta-Llama-3.1-8B-Instruct"
+FT_MODEL_ID     = "unsloth/Qwen3-8B"
 
 # Dataset paths
 FT_DATASET_PATH = BASE_DIR / "DATA" / "finetune" / "synthetic_qa_dataset.jsonl"
@@ -58,10 +57,10 @@ FT_TARGET_MODULES   = [           # layers to apply LoRA to
 ]
 
 # Training hyperparameters
-FT_MAX_SEQ_LEN      = 2048        # max token length per sample
+FT_MAX_SEQ_LEN      = 1024        # max token length per sample (VRAM-optimized for 8GB)
 FT_LOAD_IN_4BIT     = True        # 4-bit QLoRA (halves VRAM requirement)
-FT_BATCH_SIZE       = 2           # per-device batch size
-FT_GRAD_ACCUM       = 4           # effective batch = FT_BATCH_SIZE × FT_GRAD_ACCUM = 8
+FT_BATCH_SIZE       = 1           # per-device batch size
+FT_GRAD_ACCUM       = 8           # effective batch = FT_BATCH_SIZE × FT_GRAD_ACCUM = 8
 FT_EPOCHS           = 3
 FT_LR               = 2e-4
 FT_WARMUP_STEPS     = 10
