@@ -57,7 +57,7 @@ FT_TARGET_MODULES   = [           # layers to apply LoRA to
 ]
 
 # Training hyperparameters
-FT_MAX_SEQ_LEN      = 1024        # max token length per sample (VRAM-optimized for 8GB)
+FT_MAX_SEQ_LEN      = 512        # max token length per sample (VRAM-optimized for 8GB)
 FT_LOAD_IN_4BIT     = True        # 4-bit QLoRA (halves VRAM requirement)
 FT_BATCH_SIZE       = 1           # per-device batch size
 FT_GRAD_ACCUM       = 8           # effective batch = FT_BATCH_SIZE × FT_GRAD_ACCUM = 8
@@ -68,8 +68,14 @@ FT_WEIGHT_DECAY     = 0.01
 FT_LR_SCHEDULER     = "linear"
 
 # Output options
-FT_EXPORT_GGUF      = True        # export GGUF so it can be re-imported into Ollama as deepseek-r1:8b
+FT_EXPORT_GGUF      = True        # export GGUF so it can be re-imported into Ollama as qwen3-8b-finetuned
 FT_GGUF_QUANT       = "q4_k_m"   # quantisation method for GGUF export
+
+# ── Fine-Tuned Inference Settings (used by rag_engine.py) ────────────────────
+USE_FINETUNED_MODEL         = True            # True → load LoRA adapter via Unsloth
+FT_INFERENCE_ADAPTER        = FT_OUTPUT_DIR   # path to the saved LoRA adapter directory
+FT_INFERENCE_LOAD_4BIT      = True            # load in 4-bit (saves VRAM)
+FT_INFERENCE_MAX_NEW_TOKENS = MAX_NEW_TOKENS
 
 # Dataset generation settings (pipeline_03a_gen_dataset.py)
 # Generation backend priority: groq → ollama → template

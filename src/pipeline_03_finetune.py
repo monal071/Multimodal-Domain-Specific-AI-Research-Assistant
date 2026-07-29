@@ -5,8 +5,8 @@ Unsloth LoRA fine-tuning pipeline for the Research Assistant project.
 
 Loads the RAG-aware chat-format dataset produced by pipeline_03a_gen_dataset.py
 (OpenAI messages schema), fine-tunes the chosen base model with 4-bit QLoRA
-via Unsloth's SFTTrainer using the model's native chat template, and saves the
-LoRA adapter (+ optionally exports to GGUF for Ollama).
+via Unsloth's FastLanguageModel + SFTTrainer using the model's native chat
+template, and saves the LoRA adapter (+ optionally exports to GGUF for Ollama).
 
 Dataset format expected (one JSON object per line):
     {
@@ -22,8 +22,6 @@ Prerequisites:
        python src/pipeline_03a_gen_dataset.py
   2. Install Unsloth (Linux / WSL2 / Colab recommended):
        pip install "unsloth[colab-new]>=2024.9" trl>=0.9.0 peft>=0.11.0 datasets>=2.19.0
-     On native Windows (slower, no CUDA kernels):
-       pip install "unsloth[windows]>=2024.9" trl peft datasets
 
 Usage:
   python src/pipeline_03_finetune.py
@@ -38,24 +36,19 @@ import os
 import sys
 from pathlib import Path
 
-# Check & import unsloth first before transformers/trl/peft
-_UNSLOTH_AVAILABLE = False
+# ── Unsloth must be imported FIRST, before transformers/trl/peft ───────────────
 try:
-    import unsloth
-    _UNSLOTH_AVAILABLE = True
-except Exception:
-    _UNSLOTH_AVAILABLE = False
+    from unsloth import FastLanguageModel
+    from unsloth import is_bfloat16_supported
+except ImportError as e:
+    print(
+        "\n[ERROR] Unsloth is not installed or failed to import.\n"
+        "  Install on Linux / WSL2 / Colab:\n"
+        "    pip install 'unsloth[colab-new]>=2024.9' trl>=0.9.0 peft>=0.11.0 datasets>=2.19.0\n"
+    )
+    raise
 
-# Disable Unsloth fused cross-entropy patch when using HF PEFT mode
-os.environ["UNSLOTH_ENABLE_FUSED_CROSS_ENTROPY"] = "0"
-os.environ["UNSLOTH_DISABLE_FUSED_CROSS_ENTROPY"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-try:
-    import unsloth_zoo.fused_losses.cross_entropy_loss as _ce
-    _ce._get_chunk_multiplier = lambda vocab_size, target_gb=1.0: 1.0
-except Exception:
-    pass
 
 # ── path bootstrap ─────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
@@ -76,6 +69,66 @@ _REQUIRED_HEADINGS = [
     "### Empirical Results",
     "### Citations",
 ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  INFERENCE  — load the saved LoRA adapter and run generation
+#  (imported by rag_engine.py; no training dependencies needed at import time)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class FinetunedGenerator:
+    """
+    Loads the fine-tuned Qwen3-8B LoRA adapter via Unsloth and runs inference.
+    Instantiated once at RAGEngine startup and kept in GPU memory.
+    """
+
+    def __init__(self, adapter_path: Path, load_in_4bit: bool = True):
+        from config import FT_INFERENCE_MAX_NEW_TOKENS
+
+        print(f"[FT] Loading fine-tuned Qwen3-8B from: {adapter_path}")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name     = str(adapter_path),
+            max_seq_length = FT_INFERENCE_MAX_NEW_TOKENS + 512,
+            dtype          = None,
+            load_in_4bit   = load_in_4bit,
+        )
+        FastLanguageModel.for_inference(model)   # 2× speed
+        self._model = model
+        self._tok   = tokenizer
+        print(f"[FT] ✓ Unsloth FastLanguageModel ready  (4bit={load_in_4bit})")
+
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def generate(self, prompt: str, max_new_tokens: int = 2048) -> str:
+        """Generate text from a plain-string prompt. Strips Qwen3 <think> tags."""
+        import torch
+
+        inputs = self._tok(prompt, return_tensors="pt", truncation=True, max_length=4096)
+        inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+
+        with torch.inference_mode():
+            output_ids = self._model.generate(
+                **inputs,
+                max_new_tokens     = max_new_tokens,
+                temperature        = 0.7,
+                do_sample          = False,
+                repetition_penalty = 1.05,
+                pad_token_id       = self._tok.eos_token_id,
+            )
+
+        prompt_len = inputs["input_ids"].shape[-1]
+        answer = self._tok.decode(output_ids[0][prompt_len:], skip_special_tokens=True).strip()
+        print(answer)
+
+        if "<think>" in answer:
+            answer = answer.split("</think>")[-1].strip() if "</think>" in answer \
+                     else "[Thinking truncated — increase FT_INFERENCE_MAX_NEW_TOKENS.]"
+
+        return answer
+
+    def generate_short(self, prompt: str, max_new_tokens: int = 150) -> str:
+        """Lightweight call for HyDE query rewriting."""
+        return self.generate(prompt, max_new_tokens=max_new_tokens)
 
 
 # ── dataset helpers ─────────────────────────────────────────────────────────────
@@ -134,28 +187,19 @@ def load_dataset_from_jsonl(path: Path, test_mode: bool = False) -> list:
     return records
 
 
-# ── environment check ──────────────────────────────────────────────────────────
-
-def _check_unsloth_available() -> bool:
-    return _UNSLOTH_AVAILABLE
-
+# ── GPU info ───────────────────────────────────────────────────────────────────
 
 def _print_gpu_info():
-    try:
-        import torch
-        if torch.cuda.is_available():
-            name = torch.cuda.get_device_name(0)
-            vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-            print(f"GPU             : {name}  ({vram:.1f} GB VRAM)")
-            cap = torch.cuda.get_device_capability()
-            bf16_ok = cap[0] >= 8
-            print(f"bf16 support    : {'Yes' if bf16_ok else 'No (will use fp16)'}")
-            return bf16_ok
-        else:
-            print("GPU             : Not available — training will be very slow on CPU")
-            return False
-    except Exception:
-        return False
+    import torch
+    if torch.cuda.is_available():
+        name = torch.cuda.get_device_name(0)
+        vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"GPU             : {name}  ({vram:.1f} GB VRAM)")
+    else:
+        print("GPU             : Not available — training will be very slow on CPU")
+    bf16_ok = is_bfloat16_supported()
+    print(f"bf16 support    : {'Yes' if bf16_ok else 'No (will use fp16)'}")
+    return bf16_ok
 
 
 # ── main training function ─────────────────────────────────────────────────────
@@ -169,130 +213,78 @@ def run_training(
     from trl import SFTTrainer, SFTConfig
     from datasets import Dataset
 
-    use_unsloth = _check_unsloth_available()
+    epochs = extra_epochs if extra_epochs is not None else FT_EPOCHS
+    export_gguf = force_export_gguf or FT_EXPORT_GGUF
 
     print("=" * 62)
     print("  LoRA Fine-Tuning — Research Assistant")
     print("=" * 62)
     print(f"Base model      : {FT_MODEL_ID}")
-    print(f"Engine          : {'Unsloth (FastLanguageModel)' if use_unsloth else 'HuggingFace PEFT + BitsAndBytes (4-bit QLoRA)'}")
+    print(f"Engine          : Unsloth (FastLanguageModel)")
     print(f"LoRA rank       : {FT_LORA_R}  (alpha={FT_LORA_ALPHA})")
     print(f"Max seq length  : {FT_MAX_SEQ_LEN}")
     print(f"4-bit QLoRA     : {FT_LOAD_IN_4BIT}")
     print(f"Dataset format  : chat (messages)")
 
     supports_bf16 = _print_gpu_info()
-    epochs = extra_epochs if extra_epochs is not None else FT_EPOCHS
-    export_gguf = force_export_gguf or FT_EXPORT_GGUF
 
     if test_mode:
         print("\n[TEST MODE] 10 steps, 5 samples only\n")
 
     print()
 
-    # ── load base model & tokenizer ──────────────────────────────────────────────
-    if use_unsloth:
-        from unsloth import FastLanguageModel
-        print("Loading base model with Unsloth 4-bit quantisation...")
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name     = FT_MODEL_ID,
-            max_seq_length = FT_MAX_SEQ_LEN,
-            dtype          = None,
-            load_in_4bit   = FT_LOAD_IN_4BIT,
-        )
-        print("Attaching LoRA adapters via Unsloth...")
-        model = FastLanguageModel.get_peft_model(
-            model,
-            r                          = FT_LORA_R,
-            lora_alpha                 = FT_LORA_ALPHA,
-            lora_dropout               = FT_LORA_DROPOUT,
-            target_modules             = FT_TARGET_MODULES,
-            bias                       = "none",
-            use_gradient_checkpointing = "unsloth",
-            random_state               = 42,
-            use_rslora                 = False,
-        )
-    else:
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    # ── load base model & tokenizer via Unsloth ──────────────────────────────
+    # Free any cached VRAM before loading the base model
+    torch.cuda.empty_cache()
+    print("Loading base model with Unsloth 4-bit quantisation...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name     = FT_MODEL_ID,
+        max_seq_length = FT_MAX_SEQ_LEN,
+        # Force all layers to GPU 0 — prevents accelerate from offloading
+        # layers to CPU/disk when VRAM is tight (bitsandbytes 4-bit does
+        # not support CPU offloading).
+        device_map     = {"" : 0},
+        dtype          = torch.bfloat16 if supports_bf16 else torch.float16,
+        load_in_4bit   = FT_LOAD_IN_4BIT,
+    )
 
-        print("Loading base model with HuggingFace BitsAndBytes 4-bit quantisation...")
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16 if supports_bf16 else torch.float16,
-        )
+    print("Attaching LoRA adapters via Unsloth...")
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r                          = FT_LORA_R,
+        lora_alpha                 = FT_LORA_ALPHA,
+        lora_dropout               = FT_LORA_DROPOUT,
+        target_modules             = FT_TARGET_MODULES,
+        bias                       = "none",
+        use_gradient_checkpointing = "unsloth",
+        random_state               = 42,
+        use_rslora                 = False,
+    )
 
-        tokenizer = AutoTokenizer.from_pretrained(FT_MODEL_ID, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        device_map = {"": 0} if torch.cuda.is_available() else "auto"
-        model = AutoModelForCausalLM.from_pretrained(
-            FT_MODEL_ID,
-            quantization_config=quantization_config,
-            device_map=device_map,
-            trust_remote_code=True,
-        )
-        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
-
-        # Patch unsloth_zoo memory check if imported during model loading
-        try:
-            import unsloth_zoo.fused_losses.cross_entropy_loss as _ce
-            _ce._get_chunk_multiplier = lambda *args, **kwargs: 1.0
-            _ce.get_chunk_size = lambda *args, **kwargs: 1
-        except Exception:
-            pass
-
-        print("Attaching LoRA adapters via PEFT...")
-        lora_config = LoraConfig(
-            r=FT_LORA_R,
-            lora_alpha=FT_LORA_ALPHA,
-            lora_dropout=FT_LORA_DROPOUT,
-            target_modules=FT_TARGET_MODULES,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, lora_config)
-        model.config.use_cache = False
-
-    # ── load & format dataset ──────────────────────────────────────────────────
-    from transformers import TrainingArguments, Trainer, DataCollatorForSeq2Seq
-
+    # ── load & format dataset ────────────────────────────────────────────────
     raw_records = load_dataset_from_jsonl(FT_DATASET_PATH, test_mode=test_mode)
     dataset     = Dataset.from_list(raw_records)
 
-    def tokenize_chat(examples: dict) -> dict:
-        texts = []
-        for messages in examples["messages"]:
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            texts.append(text)
-
-        tokenized = tokenizer(
-            texts,
-            truncation=True,
-            max_length=FT_MAX_SEQ_LEN,
-            padding=False,
-        )
-        tokenized["labels"] = [list(ids) for ids in tokenized["input_ids"]]
-        return tokenized
-
     print("Tokenizing dataset with model chat template...")
     dataset = dataset.map(
-        tokenize_chat,
+        lambda examples: {
+            "text": [
+                tokenizer.apply_chat_template(
+                    msgs,
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                for msgs in examples["messages"]
+            ]
+        },
         batched=True,
         remove_columns=dataset.column_names,
-        desc="Tokenizing dataset",
+        desc="Formatting dataset",
     )
 
-    # ── training arguments ─────────────────────────────────────────────────────
-    training_args = TrainingArguments(
-        output_dir                  = str(FT_OUTPUT_DIR / "checkpoints"),
+    # ── SFT config (Unsloth-native) ──────────────────────────────────────────
+    sft_config = SFTConfig(
+        output_dir                   = str(FT_OUTPUT_DIR / "checkpoints"),
         num_train_epochs             = epochs,
         per_device_train_batch_size  = FT_BATCH_SIZE,
         gradient_accumulation_steps  = FT_GRAD_ACCUM,
@@ -308,33 +300,34 @@ def run_training(
         seed                         = 42,
         report_to                    = "none",
         save_strategy                = "epoch" if not test_mode else "no",
-        gradient_checkpointing       = True,
+        dataset_text_field           = "text",
+        max_seq_length               = FT_MAX_SEQ_LEN,
+        packing                      = False,
     )
 
-    # ── build trainer ──────────────────────────────────────────────────────────
-    trainer = Trainer(
-        model            = model,
-        args             = training_args,
-        train_dataset    = dataset,
-        processing_class = tokenizer,
-        data_collator    = DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=8, return_tensors="pt"),
+    # ── build Unsloth SFTTrainer ─────────────────────────────────────────────
+    trainer = SFTTrainer(
+        model         = model,
+        tokenizer     = tokenizer,
+        train_dataset = dataset,
+        args          = sft_config,
     )
 
-    # ── train ──────────────────────────────────────────────────────────────────
+    # ── train ────────────────────────────────────────────────────────────────
     print("\nStarting training...")
     trainer_stats = trainer.train()
 
     print(f"\nTraining complete!")
     print(f"  Training runtime : {trainer_stats.metrics.get('train_runtime', 0):.1f}s")
 
-    # ── save LoRA adapter ──────────────────────────────────────────────────────
+    # ── save LoRA adapter ────────────────────────────────────────────────────
     FT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving LoRA adapter -> {FT_OUTPUT_DIR}")
     model.save_pretrained(str(FT_OUTPUT_DIR))
     tokenizer.save_pretrained(str(FT_OUTPUT_DIR))
     print("  LoRA adapter saved.")
 
-    # ── optional: export to GGUF ───────────────────────────────────────────────
+    # ── optional: export to GGUF ─────────────────────────────────────────────
     if export_gguf and not test_mode:
         FT_GGUF_DIR.mkdir(parents=True, exist_ok=True)
         gguf_path = FT_GGUF_DIR / f"model-{FT_GGUF_QUANT}.gguf"
@@ -354,8 +347,7 @@ def run_training(
 # ── post-training instructions ─────────────────────────────────────────────────
 
 def _print_ollama_import_instructions(gguf_path: Path):
-    model_name = "deepseek-r1:8b"   # overwrite the base model — app.py needs no changes
-    # Updated system prompt matches the structured-response persona trained into the model.
+    model_name = "qwen3-8b-finetuned"   # update config.py OLLAMA_MODEL to this
     modelfile_content = f"""FROM {gguf_path.as_posix()}
 PARAMETER temperature 0.7
 PARAMETER num_predict 1024

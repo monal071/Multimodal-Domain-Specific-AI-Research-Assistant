@@ -19,7 +19,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 import gradio as gr
 import requests as _req
-from config import OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, MAX_NEW_TOKENS
+from config import OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, MAX_NEW_TOKENS, USE_FINETUNED_MODEL
 from rag_engine import RAGEngine
 
 # ── Load engine once at startup ───────────────────────────────────────────────
@@ -70,69 +70,24 @@ def chat(message: str, history: list, rewrite: bool):
             "---\n\n"
         )
 
-    # ── 4. Build prompt + stream answer ──────────────────────────────────────
+    # ── 4. Build prompt + generate answer (fine-tuned model or Ollama) ──────────
     context = engine._build_context(ranked)
     prompt  = engine._build_prompt(message, context)
 
-    history = history + [{"role": "user", "content": message}, {"role": "assistant", "content": ""}]
-    answer_parts = []
-    in_think = False
-    buffer   = ""
+    history = history + [{"role": "user", "content": message},
+                         {"role": "assistant", "content": ""}]
 
     try:
-        with _req.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={
-                "model":   OLLAMA_MODEL,
-                "prompt":  prompt,
-                "stream":  True,
-                "options": {
-                    "num_predict":    MAX_NEW_TOKENS,
-                    "temperature":    0.0,
-                    "repeat_penalty": 1.05,
-                },
-            },
-            timeout=OLLAMA_TIMEOUT,
-            stream=True,
-        ) as resp:
-            resp.raise_for_status()
-            for raw_line in resp.iter_lines():
-                if not raw_line:
-                    continue
-                data  = json.loads(raw_line)
-                token = data.get("response", "")
-
-                if token:
-                    buffer += token
-                    answer_parts.append(token)
-
-                    # suppress <think>...</think> blocks from the UI
-                    if "<think>" in buffer:
-                        in_think = True
-                    if in_think:
-                        if "</think>" in buffer:
-                            in_think = False
-                            buffer   = buffer.split("</think>")[-1]
-                        else:
-                            if data.get("done"):
-                                break
-                            continue  # still in think block, don't yield
-
-                    history[-1]["content"] = rewrite_note + buffer
-                    yield history, sources_md
-
-                if data.get("done"):
-                    break
-
-    except _req.RequestException as e:
-        history[-1]["content"] = f"❌ Ollama error: {e}"
+        full_answer = engine._generate(prompt)
+    except Exception as e:
+        history[-1]["content"] = f"❌ Generation error: {e}"
         yield history, sources_md
         return
 
-    # ── 5. Final — save to engine memory ─────────────────────────────────────
-    full_answer = "".join(answer_parts)
-    if "<think>" in full_answer and "</think>" in full_answer:
-        full_answer = full_answer.split("</think>")[-1].strip()
+    history[-1]["content"] = rewrite_note + full_answer
+    yield history, sources_md
+
+    # ── 5. Save to engine memory ───────────────────────────────────────────
     engine._history.append({"question": message, "answer": full_answer})
 
     yield history, sources_md
@@ -144,16 +99,95 @@ def clear_history():
     return [], ""
 
 
+# ── Determine the actual backend that loaded (checked at startup) ─────────────
+_using_finetuned = engine._ft is not None
+if _using_finetuned:
+    _badge_html = """
+<style>
+  #model-badge {
+    position: fixed;
+    top: 14px;
+    right: 18px;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: rgba(16, 185, 129, 0.15);
+    border: 1.5px solid rgba(16, 185, 129, 0.6);
+    border-radius: 999px;
+    padding: 5px 14px 5px 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #10b981;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 2px 12px rgba(16,185,129,0.15);
+    pointer-events: none;
+  }
+  #model-badge .dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: #10b981;
+    box-shadow: 0 0 6px #10b981;
+    animation: pulse-green 2s infinite;
+  }
+  @keyframes pulse-green {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
+  }
+</style>
+<div id="model-badge">
+  <span class="dot"></span>
+  ✦ Fine-Tuned Qwen3-8B
+</div>
+"""
+else:
+    _badge_html = f"""
+<style>
+  #model-badge {{
+    position: fixed;
+    top: 14px;
+    right: 18px;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1.5px solid rgba(245, 158, 11, 0.5);
+    border-radius: 999px;
+    padding: 5px 14px 5px 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #f59e0b;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 2px 12px rgba(245,158,11,0.12);
+    pointer-events: none;
+  }}
+  #model-badge .dot {{
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: #f59e0b;
+  }}
+</style>
+<div id="model-badge">
+  <span class="dot"></span>
+  ◈ Ollama · {OLLAMA_MODEL}
+</div>
+"""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Gradio UI
 # ══════════════════════════════════════════════════════════════════════════════
 
 with gr.Blocks(title="Research Assistant") as demo:
 
+    # Fixed corner badge — shows actual runtime backend
+    gr.HTML(_badge_html)
+
     gr.Markdown(
         "# 🔬 Research Assistant\n"
         "**Multimodal Domain-Specific AI** · RAG + LoRA · "
-        f"Model: `{OLLAMA_MODEL}` · Hybrid BM25 + FAISS retrieval"
+        f"Hybrid BM25 + ChromaDB retrieval"
     )
 
     with gr.Row():
