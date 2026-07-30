@@ -1,11 +1,10 @@
 from pathlib import Path
 
-BASE_DIR = Path(r"D:\projects\Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)")
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ── Data Directories ──────────────────────────────────────────────────────────
 PDF_DIR    = BASE_DIR / "DATA" / "raw data" / "papers"
 PARSED_DIR = BASE_DIR / "DATA" / "PARSED DATA"
-INDEX_DIR        = BASE_DIR / "DATA" / "INDEX"   # kept for legacy reference
 CHROMA_DIR       = BASE_DIR / "DATA" / "CHROMADB"
 CHROMA_COLLECTION = "research_papers"
 

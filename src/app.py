@@ -191,7 +191,7 @@ with gr.Blocks(title="Research Assistant") as demo:
             ["What is Flash Attention and why is it more memory-efficient?"],
             ["How does XLNet differ from BERT in pretraining?"],
             ["Explain the Switch Transformer Mixture-of-Experts architecture."],
-            ["What is LoRA fine-tuning and how does it reduce trainable parameters?"],
+            ["How does scaled dot-product attention work in Transformers?"],
             ["How does chain-of-thought prompting improve reasoning in LLMs?"],
         ],
         inputs=msg_box,

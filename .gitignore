@@ -119,13 +119,11 @@ Thumbs.db
 .idea/
 
 # --- Project Specific Ignores ---
-# Large models (e.g. DeepSeek-R1-Qwen)
-models/
-
-# Local raw papers, parsed data, and built search indexes
+# Local raw papers, parsed data, and vector store
 DATA/
 
 # Temporary directories used during ingestion/processing
 temp_chunks/
 temp/
 tmp/
+

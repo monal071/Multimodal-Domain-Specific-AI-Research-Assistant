@@ -1,5 +1,5 @@
 """
-RAG Pipeline — Query Engine with Hybrid Retrieval
+RAG Query Engine — Hybrid Retrieval Pipeline
   - BM25 + ChromaDB with Reciprocal Rank Fusion
   - BGE embeddings on CUDA/CPU
   - Ollama (qwen3:8b) for generation

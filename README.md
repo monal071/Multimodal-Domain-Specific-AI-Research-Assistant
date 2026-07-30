@@ -1,54 +1,50 @@
-# Multimodal Domain-Specific AI Research Assistant (RAG + LoRA Fine-Tuning)
+# Domain-Specific AI Research Assistant
 
-A domain-specific research assistant implementing a high-performance Retrieval-Augmented Generation (RAG) pipeline to query scientific literature. The system runs local models for text embeddings, cross-encoder reranking, and generation with 4-bit quantization.
+A domain-specific research assistant implementing a high-performance Retrieval-Augmented Generation (RAG) pipeline to query scientific literature. The system runs fully locally — embeddings, reranking, and generation all run on your machine with no external API calls.
 
 ---
 
 ## Key Features
 
-1. **Intelligent PDF Ingestion**:
+1. **Intelligent PDF Ingestion**
    - Uses **Docling** for structured layout extraction, table parsing, and visual structure mapping.
-   - Splits documents into page-based batches to manage memory overhead for long papers.
    - Implements a custom heading-aware text chunker with conditional sliding-window overlaps.
 
-2. **Advanced Hybrid Retrieval**:
-   - **Dense Retrieval**: Semantic search powered by `BAAI/bge-large-en-v1.5` embeddings and a **FAISS IVFFlat** index.
+2. **Advanced Hybrid Retrieval**
+   - **Dense Retrieval**: Semantic search powered by `BAAI/bge-large-en-v1.5` embeddings stored in **ChromaDB**.
    - **Sparse Retrieval**: Keyword matching powered by the **BM25Okapi** algorithm.
    - **Rank Fusion**: Combines dense and sparse candidates using **Reciprocal Rank Fusion (RRF)**.
 
-3. **Two-Stage Retrieval & Optimization**:
-   - **Query Rewriting**: Uses the generation model to transform conversational queries into precise academic search queries.
-   - **Reranking**: Scores and filters top results using a cross-encoder model (`BAAI/bge-reranker-v2-m3`).
+3. **Two-Stage Retrieval & Optimization**
+   - **Query Rewriting (HyDE)**: Uses the base model to transform conversational queries into precise academic search terms before retrieval.
+   - **Reranking**: Scores and filters top results using a cross-encoder (`BAAI/bge-reranker-v2-m3`).
    - **Context Expansion**: Optional adjacent-chunk lookup using document structural indices.
 
-4. **Local Generation via Ollama**:
-   - Implements a conversational answer engine using **DeepSeek-R1** hosted locally via Ollama.
-   - Streams generation directly to the web interface in real-time.
-   - Conversational memory window to resolve multi-turn context (e.g., "that", "this method").
-   - VRAM-optimized design (Reranker mapped to CPU, LLM managed by Ollama).
+4. **Local Generation via Ollama**
+   - Answer generation using `qwen3:8b` (or any Ollama model) hosted locally.
+   - Real-time token streaming to the web interface.
+   - Conversational memory window to resolve multi-turn references (e.g., "that", "this method").
 
 ---
 
 ## Directory Structure
 
 ```text
-├── DATA/                               # Excluded from version control
+├── DATA/                           # Excluded from version control
 │   ├── raw data/
-│   │   └── papers/                     # Put source PDF research papers here
-│   ├── PARSED DATA/                    # JSONL outputs from ingestion
-│   ├── INDEX/                          # FAISS index and metadata pickle files
-│   └── faiss_index/                    # Alternative/legacy FAISS indexes
-├── models/                             # Local weights folder (e.g., DeepSeek-R1-Qwen)
+│   │   └── papers/                 # Place source PDF research papers here
+│   ├── PARSED DATA/                # JSONL outputs from ingestion pipeline
+│   └── CHROMADB/                   # ChromaDB persistent vector store
 ├── src/
-│   ├── config.py                       # Centralized global configurations and paths
-│   ├── models.py                       # Shared data classes (RAGResult, RetrievedChunk)
-│   ├── ingestion.py                    # PDF parser & custom chunker
-│   ├── index0.py                       # Embedding generator & FAISS index builder
-│   ├── index.py                        # Core RAG Engine (Hybrid Search + Reranker)
-│   └── gradio_app.py                   # Interactive Web UI (Gradio)
-├── .gitignore                          # Exclusions for large models, indexes, and environments
-├── requirements.txt                    # Project dependencies
-└── README.md                           # Documentation
+│   ├── config.py                   # Centralized settings (paths, models, thresholds)
+│   ├── schema.py                   # Shared data classes (RAGResult, RetrievedChunk)
+│   ├── pipeline_01_ingest.py       # PDF parser & heading-aware chunker
+│   ├── pipeline_02_embed.py        # BGE embedding generator & ChromaDB indexer
+│   ├── rag_engine.py               # Core RAG Engine (Hybrid Search + Reranker + Ollama)
+│   └── app.py                      # Gradio web UI
+├── .gitignore
+├── requirements.txt
+└── README.md
 ```
 
 ---
@@ -56,19 +52,19 @@ A domain-specific research assistant implementing a high-performance Retrieval-A
 ## Setup & Installation
 
 ### 1. Prerequisites
-- **Python 3.11** is recommended for library compatibility (especially PyTorch and CUDA bindings).
-- **NVIDIA GPU** with CUDA support and at least 8GB of VRAM.
+- **Python 3.11+**
+- **NVIDIA GPU** with CUDA (recommended) — CPU fallback is supported
+- **Ollama** installed and running: https://ollama.com
 
-### 2. Environment Setup
-Create and activate a virtual environment (using Conda is recommended):
+### 2. Pull the Base Model
 ```bash
-conda create -n env1 python=3.11 -y
-conda activate env1
+ollama pull qwen3:8b
 ```
 
-### 3. Install Dependencies
-Install the required packages from `requirements.txt`:
+### 3. Create Environment & Install Dependencies
 ```bash
+conda create -n rag-assistant python=3.11 -y
+conda activate rag-assistant
 pip install -r requirements.txt
 ```
 
@@ -76,23 +72,27 @@ pip install -r requirements.txt
 
 ## Pipeline Execution
 
-### Step 1: Ingestion (PDF to Chunks)
-Place your target research papers (`.pdf`) into the `DATA/raw data/papers` directory, then execute the ingestion script:
+### Step 1: Ingest PDFs
+Place your research papers (`.pdf`) into `DATA/raw data/papers/`, then run:
 ```bash
-python src/ingestion.py
+python src/pipeline_01_ingest.py
 ```
-This splits and parses the PDFs into structured markdown, processes tables, chunks the text, and writes `.jsonl` files into `DATA/PARSED DATA`.
+Parses PDFs with Docling, chunks text with heading-aware splitter, and writes `.jsonl` to `DATA/PARSED DATA/`.
 
-### Step 2: Index Building
-Generate embeddings for the parsed document chunks and build the search index:
+### Step 2: Build Vector Index
 ```bash
-python src/index0.py
+python src/pipeline_02_embed.py
 ```
-This script runs BGE embedding on CUDA, creates a FAISS index, builds a BM25 lookup database, and saves the retrieval assets to `DATA/INDEX/`.
+Generates BGE embeddings on CUDA, stores vectors in ChromaDB (`DATA/CHROMADB/`), and builds the BM25 corpus.
 
-### Step 3: Run the Web Interface
-Launch the interactive web UI to chat with your document repository:
+### Step 3: Run the Web UI
 ```bash
-python src/gradio_app.py
+python src/app.py
 ```
-This will open a local web server (typically `http://localhost:7861`) in your browser. You can view sources, toggle query rewriting, and chat interactively.
+Opens the Gradio chat interface at `http://localhost:7861`.
+
+### Step 3 (alternative): CLI Mode
+```bash
+python src/rag_engine.py
+```
+Interactive terminal. Commands: `exit` | `clear` | prefix `norewrite` to skip HyDE query rewriting.
