@@ -2,8 +2,6 @@
 torch>=2.0.0
 transformers>=4.40.0
 sentence-transformers>=3.0.0
-bitsandbytes>=0.42.0
-accelerate>=0.28.0
 
 # Document Ingestion & Chunking
 docling>=2.0.0
@@ -20,15 +18,3 @@ gradio>=4.0.0
 requests
 nltk
 scikit-learn
-
-# ── Fine-Tuning (Unsloth + LoRA) ─────────────────────────────────────────────
-# On Linux / WSL2 / Colab (recommended):
-unsloth[colab-new]>=2024.9
-# On native Windows (fallback — no CUDA kernel speedup):
-# unsloth[windows]>=2024.9
-trl>=0.9.0
-peft>=0.11.0
-datasets>=2.19.0
-groq>=0.9.0          # Groq API client (used for high-quality dataset generation)
-
-

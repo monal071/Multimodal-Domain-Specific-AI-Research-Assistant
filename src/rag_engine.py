@@ -2,7 +2,7 @@
 RAG Pipeline — Query Engine with Hybrid Retrieval
   - BM25 + ChromaDB with Reciprocal Rank Fusion
   - BGE embeddings on CUDA/CPU
-  - Fine-tuned Qwen3-8B LoRA model (primary) or Ollama (fallback) for generation
+  - Ollama (qwen3:8b) for generation
   - Reranker, query rewriting (HyDE), conversation memory
 """
 
@@ -29,13 +29,8 @@ from config import (
     EMBED_DEVICE, RERANK_DEVICE, RETRIEVAL_TOP_K, RERANK_TOP_N, CONTEXT_WINDOW,
     MAX_NEW_TOKENS, MAX_HISTORY,
     OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT,
-    USE_FINETUNED_MODEL, FT_INFERENCE_ADAPTER,
-    FT_INFERENCE_LOAD_4BIT, FT_INFERENCE_MAX_NEW_TOKENS,
 )
 from schema import RetrievedChunk, RAGResult
-
-
-from pipeline_03_finetune import FinetunedGenerator
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -149,7 +144,7 @@ class RAGEngine:
         chroma_client   = chromadb.PersistentClient(path=str(CHROMA_DIR))
         self.collection = chroma_client.get_collection(name=CHROMA_COLLECTION)
         n_total         = self.collection.count()
-        print(f"[1/5] ChromaDB collection  ({n_total:,} vectors)  {time.time()-t0:.1f}s")
+        print(f"[1/4] ChromaDB collection  ({n_total:,} vectors)  {time.time()-t0:.1f}s")
 
         # -- Build BM25 corpus from ChromaDB (load all docs + metadata) -------
         t0 = time.time()
@@ -179,8 +174,7 @@ class RAGEngine:
             c["chunk_id"]: i for i, c in enumerate(self._bm25_corpus)
         }
         self._bm25 = BM25Index(self._bm25_corpus)
-        print(f"[2/5] BM25 index           ({len(self._bm25_corpus):,} docs)  {time.time()-t0:.1f}s")
-
+        print(f"[2/4] BM25 index           ({len(self._bm25_corpus):,} docs)  {time.time()-t0:.1f}s")
 
         # -- Embedder (auto device: CUDA if available, else CPU) -------------
         import torch
@@ -191,7 +185,7 @@ class RAGEngine:
             print("  [INFO] No CUDA detected — running embedder & reranker on CPU")
         t0 = time.time()
         self.embedder = SentenceTransformer(EMBED_MODEL, device=_embed_device)
-        print(f"[3/5] Embedder          ({EMBED_MODEL} on {_embed_device})  {time.time()-t0:.1f}s")
+        print(f"[3/4] Embedder          ({EMBED_MODEL} on {_embed_device})  {time.time()-t0:.1f}s")
 
         # ── Reranker (auto device) ────────────────────────────────
         self.reranker = None
@@ -200,46 +194,24 @@ class RAGEngine:
             self.reranker = CrossEncoder(RERANK_MODEL, device=_rerank_device, max_length=512)
             print(f"[3b]  Reranker           ({RERANK_MODEL} on {_rerank_device})  {time.time()-t0:.1f}s")
 
-        # ── Fine-tuned Qwen3-8B LoRA (primary) or Ollama (fallback) ─────────
-        self._ft: Optional[FinetunedGenerator] = None
+        # ── Ollama health-check ────────────────────────────────────────────
         self._ollama_ok = False
-
-        if USE_FINETUNED_MODEL:
-            if FT_INFERENCE_ADAPTER.exists() and any(FT_INFERENCE_ADAPTER.iterdir()):
-                t0 = time.time()
-                try:
-                    self._ft = FinetunedGenerator(
-                        adapter_path = FT_INFERENCE_ADAPTER,
-                        load_in_4bit = FT_INFERENCE_LOAD_4BIT,
-                    )
-                    print(f"[4/5] Fine-tuned model ready  {time.time()-t0:.1f}s")
-                except Exception as e:
-                    print(f"[4/5] WARNING: Could not load fine-tuned model: {e}", file=sys.stderr)
-                    print("      Falling back to Ollama.", file=sys.stderr)
+        t0 = time.time()
+        print(f"[4/4] Connecting to Ollama ({OLLAMA_URL}) model={OLLAMA_MODEL} ...")
+        try:
+            resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+            resp.raise_for_status()
+            available = [m["name"] for m in resp.json().get("models", [])]
+            if not any(OLLAMA_MODEL in m for m in available):
+                print(f"  WARNING: '{OLLAMA_MODEL}' not found in Ollama.")
+                print(f"  Run:  ollama pull {OLLAMA_MODEL}")
+                print(f"  Available: {available}")
             else:
-                print(f"  WARNING: LoRA adapter not found at {FT_INFERENCE_ADAPTER}", file=sys.stderr)
-                print("  Run pipeline_03_finetune.py first, or set USE_FINETUNED_MODEL=False.",
-                      file=sys.stderr)
-                print("  Falling back to Ollama.", file=sys.stderr)
-
-        if self._ft is None:
-            # Ollama health-check (non-fatal)
-            t0 = time.time()
-            print(f"[4/5] Connecting to Ollama ({OLLAMA_URL}) model={OLLAMA_MODEL} ...")
-            try:
-                resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-                resp.raise_for_status()
-                available = [m["name"] for m in resp.json().get("models", [])]
-                if not any(OLLAMA_MODEL in m for m in available):
-                    print(f"  WARNING: '{OLLAMA_MODEL}' not found in Ollama.")
-                    print(f"  Run:  ollama pull {OLLAMA_MODEL}")
-                    print(f"  Available: {available}")
-                else:
-                    self._ollama_ok = True
-                    print(f"      OK — model ready  {time.time()-t0:.1f}s")
-            except requests.exceptions.ConnectionError:
-                print(f"  WARNING: Cannot reach Ollama at {OLLAMA_URL}.", file=sys.stderr)
-                print("  Start Ollama to enable answer generation.", file=sys.stderr)
+                self._ollama_ok = True
+                print(f"      OK — model ready  {time.time()-t0:.1f}s")
+        except requests.exceptions.ConnectionError:
+            print(f"  WARNING: Cannot reach Ollama at {OLLAMA_URL}.", file=sys.stderr)
+            print("  Start Ollama to enable answer generation.", file=sys.stderr)
 
         # ── Conversation memory ──────────────────────────────────
         self._history: list[dict] = []   # {"question": ..., "answer": ...}
@@ -248,15 +220,13 @@ class RAGEngine:
         print("Ready\n")
 
     # ──────────────────────────────────────────────────────────────
-    
     #  QUERY REWRITING
     # ──────────────────────────────────────────────────────────────
 
     def _generate_hyde_document(self, question: str) -> str:
         """
-        Generate a hypothetical answer to the question for HyDE retrieval.
-        Routes through the fine-tuned Qwen3-8B model when available,
-        otherwise falls back to Ollama.
+        Generate a hypothetical answer to the question for HyDE retrieval
+        using Ollama.
         """
         prompt = (
             f"Please write a short, highly technical, and factual academic passage "
@@ -265,18 +235,6 @@ class RAGEngine:
             f"Question: {question}\n\nPassage:"
         )
 
-        # ── Fine-tuned model path ─────────────────────────────────────────
-        if self._ft is not None:
-            try:
-                hyde_doc = self._ft.generate_short(prompt, max_new_tokens=150)
-                if hyde_doc and len(hyde_doc) >= 10:
-                    print(f"        HyDE snippet: '{hyde_doc[:80]}...'", flush=True)
-                    return hyde_doc
-            except Exception as e:
-                print(f"  [hyde] Fine-tuned model error: {e} — using original query")
-            return question
-
-        # ── Ollama path ──────────────────────────────────────────────
         try:
             resp = requests.post(
                 f"{OLLAMA_URL}/api/generate",
@@ -441,8 +399,7 @@ class RAGEngine:
         user_parts.append(f"\n=== QUESTION ===\n{query}")
         user_parts.append("\n=== ANSWER ===")
 
-        # Plain-text prompt — Ollama's /api/generate accepts raw text.
-        # The model’s system instruction is prepended as a clear header.
+        # Plain-text prompt for Ollama's /api/generate
         return f"### SYSTEM\n{system}\n\n### USER\n" + "\n".join(user_parts) + "\n\n### ASSISTANT\n"
 
     # ──────────────────────────────────────────────────────────────
@@ -450,21 +407,9 @@ class RAGEngine:
     # ──────────────────────────────────────────────────────────────
 
     def _generate(self, prompt: str) -> str:
-        """
-        Generate an answer using the fine-tuned Qwen3-8B model (primary)
-        or Ollama (fallback).
-        """
-        # ── Fine-tuned model (primary) ────────────────────────────────────
-        if self._ft is not None:
-            try:
-                return self._ft.generate(prompt)
-            except Exception as e:
-                print(f"  [generate] Fine-tuned model error: {e} — trying Ollama",
-                      file=sys.stderr)
-
-        # ── Ollama fallback ────────────────────────────────────────────
+        """Generate an answer using Ollama (streaming)."""
         if not self._ollama_ok:
-            return "[No generation backend available: load the fine-tuned model or start Ollama.]"
+            return "[No generation backend available: start Ollama and run: ollama pull " + OLLAMA_MODEL + "]"
 
         answer_parts: list[str] = []
         try:

@@ -1,12 +1,11 @@
 """
 Research Assistant — Gradio UI
 ================================
-Simple chat interface wrapping the existing RAGEngine.
+Simple chat interface wrapping the RAGEngine.
 
 Usage:
-    pip install gradio
-    python src/gradio_app.py
-    # Opens at http://localhost:7860
+    python src/app.py
+    # Opens at http://localhost:7861
 """
 
 import sys
@@ -18,8 +17,7 @@ SRC_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC_DIR))
 
 import gradio as gr
-import requests as _req
-from config import OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, MAX_NEW_TOKENS, USE_FINETUNED_MODEL
+from config import OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, MAX_NEW_TOKENS
 from rag_engine import RAGEngine
 
 # ── Load engine once at startup ───────────────────────────────────────────────
@@ -38,7 +36,6 @@ def chat(message: str, history: list, rewrite: bool):
     Yields (history, sources_markdown) pairs as tokens arrive.
     """
     from config import RETRIEVAL_TOP_K, RERANK_TOP_N
-    import time
 
     if not message.strip():
         yield history, ""
@@ -70,7 +67,7 @@ def chat(message: str, history: list, rewrite: bool):
             "---\n\n"
         )
 
-    # ── 4. Build prompt + generate answer (fine-tuned model or Ollama) ──────────
+    # ── 4. Build prompt + generate answer via Ollama ──────────────────────────
     context = engine._build_context(ranked)
     prompt  = engine._build_prompt(message, context)
 
@@ -99,49 +96,8 @@ def clear_history():
     return [], ""
 
 
-# ── Determine the actual backend that loaded (checked at startup) ─────────────
-_using_finetuned = engine._ft is not None
-if _using_finetuned:
-    _badge_html = """
-<style>
-  #model-badge {
-    position: fixed;
-    top: 14px;
-    right: 18px;
-    z-index: 9999;
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    background: rgba(16, 185, 129, 0.15);
-    border: 1.5px solid rgba(16, 185, 129, 0.6);
-    border-radius: 999px;
-    padding: 5px 14px 5px 10px;
-    font-size: 13px;
-    font-weight: 600;
-    color: #10b981;
-    backdrop-filter: blur(6px);
-    box-shadow: 0 2px 12px rgba(16,185,129,0.15);
-    pointer-events: none;
-  }
-  #model-badge .dot {
-    width: 9px; height: 9px;
-    border-radius: 50%;
-    background: #10b981;
-    box-shadow: 0 0 6px #10b981;
-    animation: pulse-green 2s infinite;
-  }
-  @keyframes pulse-green {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0.4; }
-  }
-</style>
-<div id="model-badge">
-  <span class="dot"></span>
-  ✦ Fine-Tuned Qwen3-8B
-</div>
-"""
-else:
-    _badge_html = f"""
+# ── Model badge (Ollama) ──────────────────────────────────────────────────────
+_badge_html = f"""
 <style>
   #model-badge {{
     position: fixed;
@@ -166,6 +122,12 @@ else:
     width: 9px; height: 9px;
     border-radius: 50%;
     background: #f59e0b;
+    box-shadow: 0 0 6px #f59e0b;
+    animation: pulse-amber 2s infinite;
+  }}
+  @keyframes pulse-amber {{
+    0%, 100% {{ opacity: 1; }}
+    50%       {{ opacity: 0.4; }}
   }}
 </style>
 <div id="model-badge">
@@ -181,13 +143,13 @@ else:
 
 with gr.Blocks(title="Research Assistant") as demo:
 
-    # Fixed corner badge — shows actual runtime backend
+    # Fixed corner badge
     gr.HTML(_badge_html)
 
     gr.Markdown(
         "# 🔬 Research Assistant\n"
-        "**Multimodal Domain-Specific AI** · RAG + LoRA · "
-        f"Hybrid BM25 + ChromaDB retrieval"
+        "**Domain-Specific AI** · RAG · "
+        f"Hybrid BM25 + ChromaDB retrieval · Ollama `{OLLAMA_MODEL}`"
     )
 
     with gr.Row():

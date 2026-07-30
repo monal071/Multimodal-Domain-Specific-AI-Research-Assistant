@@ -8,7 +8,6 @@ PARSED_DIR = BASE_DIR / "DATA" / "PARSED DATA"
 INDEX_DIR        = BASE_DIR / "DATA" / "INDEX"   # kept for legacy reference
 CHROMA_DIR       = BASE_DIR / "DATA" / "CHROMADB"
 CHROMA_COLLECTION = "research_papers"
-# MODEL_PATH is no longer needed — Ollama manages the model file
 
 # ── Models ────────────────────────────────────────────────────────────────────
 EMBED_MODEL  = "BAAI/bge-large-en-v1.5"
@@ -34,62 +33,3 @@ OLLAMA_TIMEOUT = 300                      # seconds; raise if you use a big mode
 
 MAX_NEW_TOKENS = 2048
 MAX_HISTORY    = 4
-
-# ── Fine-Tuning Settings (Unsloth LoRA) ──────────────────────────────────────
-# Base model — use an unsloth/* variant for 4-bit pre-quantized weights.
-# Options:
-#   "unsloth/Qwen3-8B"                           ← ACTIVE
-#   "unsloth/Meta-Llama-3.1-8B-Instruct"
-FT_MODEL_ID     = "unsloth/Qwen3-8B"
-
-# Dataset paths
-FT_DATASET_PATH = BASE_DIR / "DATA" / "finetune" / "synthetic_qa_dataset.jsonl"
-FT_OUTPUT_DIR   = BASE_DIR / "DATA" / "models" / "lora-adapter"
-FT_GGUF_DIR     = BASE_DIR / "DATA" / "models" / "gguf"
-
-# LoRA hyperparameters (Unsloth-optimised defaults)
-FT_LORA_R           = 16          # rank; 8 for lighter, 32 for higher capacity
-FT_LORA_ALPHA       = 32          # typically 2 × r
-FT_LORA_DROPOUT     = 0           # 0 is Unsloth-recommended
-FT_TARGET_MODULES   = [           # layers to apply LoRA to
-    "q_proj", "k_proj", "v_proj", "o_proj",
-    "gate_proj", "up_proj", "down_proj",
-]
-
-# Training hyperparameters
-FT_MAX_SEQ_LEN      = 512        # max token length per sample (VRAM-optimized for 8GB)
-FT_LOAD_IN_4BIT     = True        # 4-bit QLoRA (halves VRAM requirement)
-FT_BATCH_SIZE       = 1           # per-device batch size
-FT_GRAD_ACCUM       = 8           # effective batch = FT_BATCH_SIZE × FT_GRAD_ACCUM = 8
-FT_EPOCHS           = 3
-FT_LR               = 2e-4
-FT_WARMUP_STEPS     = 10
-FT_WEIGHT_DECAY     = 0.01
-FT_LR_SCHEDULER     = "linear"
-
-# Output options
-FT_EXPORT_GGUF      = True        # export GGUF so it can be re-imported into Ollama as qwen3-8b-finetuned
-FT_GGUF_QUANT       = "q4_k_m"   # quantisation method for GGUF export
-
-# ── Fine-Tuned Inference Settings (used by rag_engine.py) ────────────────────
-USE_FINETUNED_MODEL         = True            # True → load LoRA adapter via Unsloth
-FT_INFERENCE_ADAPTER        = FT_OUTPUT_DIR   # path to the saved LoRA adapter directory
-FT_INFERENCE_LOAD_4BIT      = True            # load in 4-bit (saves VRAM)
-FT_INFERENCE_MAX_NEW_TOKENS = MAX_NEW_TOKENS
-
-# Dataset generation settings (pipeline_03a_gen_dataset.py)
-# Generation backend priority: groq → ollama → template
-FT_GEN_MIN_CHARS    = 300         # skip chunks shorter than this
-FT_GEN_MAX_CHUNKS   = 5000        # cap to avoid runaway generation
-FT_GEN_USE_OLLAMA   = True        # fallback if Groq is unavailable
-FT_GEN_QUESTIONS_PER_CHUNK = 1    # number of QA pairs to generate per chunk
-
-# ── Groq API Settings (dataset generation) ───────────────────────────────────
-# Get a free API key at https://console.groq.com
-# Key is read from the GROQ_API_KEY environment variable (set in .env)
-GROQ_API_KEY_ENV    = "GROQ_API_KEY"   # env-var name (do NOT hardcode the key here)
-GROQ_MODEL          = "llama-3.3-70b-versatile"  # or: "deepseek-r1-distill-llama-70b"
-GROQ_BASE_URL       = "https://api.groq.com/openai/v1"
-GROQ_TIMEOUT        = 60           # seconds per API call
-GROQ_MAX_TOKENS     = 512          # max tokens in generated answer
-GROQ_TEMPERATURE    = 0.7
